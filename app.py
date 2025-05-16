@@ -9,6 +9,7 @@ from sklearn.preprocessing import OneHotEncoder
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from sklearn.metrics import mean_absolute_error
+from sklearn.model_selection import train_test_split
 import joblib
 import logging
 from datetime import datetime
@@ -49,7 +50,9 @@ def simulate_factory_data(num_heavy, energy_heavy, num_medium, energy_medium, p_
         shift_map_medium = {"day": num_medium, "night": num_medium, "overnight": num_medium // 5, "weekend": num_medium // 5}
         df["Intended_Heavy_On"] = df["Shift"].map(shift_map_heavy)
         df["Intended_Medium_On"] = df["Shift"].map(shift_map_medium)
-        logger.info("Machine schedules set")
+        logger.info("Machine schedules set: Heavy_On min=%d, max=%d; Medium_On min=%d, max=%d",
+                    df["Intended_Heavy_On"].min(), df["Intended_Heavy_On"].max(),
+                    df["Intended_Medium_On"].min(), df["Intended_Medium_On"].max())
 
         # Inefficiencies
         df["Heavy_On"] = df["Intended_Heavy_On"] + np.random.binomial(num_heavy - df["Intended_Heavy_On"], p_ineff)
@@ -141,17 +144,29 @@ def train_model(df, target, model_type, cache_key):
         X = data[["Shift", "Hour", "Day_of_Week"]]
         y = data[target]
 
+        # Log the target variable distribution
+        logger.info("Target %s distribution: min=%.2f, max=%.2f, mean=%.2f", target, y.min(), y.max(), y.mean())
+
+        # Split into training and validation sets
+        X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42)
+
         preprocessor = ColumnTransformer(
             transformers=[("shift", OneHotEncoder(drop="first", sparse_output=False), ["Shift"])],
             remainder="passthrough"
         )
         model = RandomForestRegressor(n_estimators=100, random_state=42) if model_type == "Random Forest" else LinearRegression()
         pipeline = Pipeline([("preprocessor", preprocessor), ("regressor", model)])
-        pipeline.fit(X, y)
-        y_pred = pipeline.predict(X)
-        mae = mean_absolute_error(y, y_pred)
+        pipeline.fit(X_train, y_train)
+
+        # Evaluate on validation set
+        y_val_pred = pipeline.predict(X_val)
+        mae = mean_absolute_error(y_val, y_val_pred)
+
+        # Log predictions for debugging
+        logger.info("Validation predictions for %s: min=%.2f, max=%.2f, mean=%.2f", target, y_val_pred.min(), y_val_pred.max(), y_val_pred.mean())
+        logger.info("Validation MAE for %s: %.2f", target, mae)
+
         joblib.dump(pipeline, f"model_{target}_{model_type.replace(' ', '_')}.joblib")
-        logger.info("Model trained for target=%s, MAE=%.2f", target, mae)
         return pipeline, mae
     except Exception as e:
         logger.error("Model training failed: %s", str(e))
@@ -216,27 +231,37 @@ def main():
             st.session_state["show_success"] = False
             st.rerun()
 
-        # JavaScript to switch to the Results tab after re-run
+        # Improved JavaScript to switch to the Results tab with retry mechanism
         if "switch_to_results" in st.session_state and st.session_state["switch_to_results"]:
-            # Streamlit tabs are rendered as buttons with role="tab" and aria-label matching the tab name
-            # "Results" is the second tab (index 1)
             js_code = """
             <script>
-                // Wait for the DOM to load
-                document.addEventListener('DOMContentLoaded', function() {
-                    // Find the "Results" tab button (second tab, index 1)
-                    const tabs = document.querySelectorAll('button[role="tab"]');
-                    if (tabs.length > 1) {
-                        const resultsTab = tabs[1];  // "Results" tab
-                        if (resultsTab) {
-                            resultsTab.click();  // Simulate click to switch to Results tab
+                function switchToResultsTab() {
+                    const maxAttempts = 10;
+                    let attempts = 0;
+                    const interval = setInterval(() => {
+                        attempts++;
+                        // Find all tab buttons
+                        const tabs = document.querySelectorAll('button[role="tab"]');
+                        if (tabs.length > 1) {
+                            const resultsTab = tabs[1];  // "Results" tab (index 1)
+                            if (resultsTab) {
+                                resultsTab.click();  // Simulate click to switch to Results tab
+                                clearInterval(interval);  // Stop trying once successful
+                            }
                         }
-                    }
-                });
+                        if (attempts >= maxAttempts) {
+                            clearInterval(interval);  // Stop after max attempts
+                            console.log("Failed to switch to Results tab after " + maxAttempts + " attempts");
+                        }
+                    }, 500);  // Retry every 500ms
+                }
+                // Run the function immediately and after DOM content is loaded
+                switchToResultsTab();
+                document.addEventListener('DOMContentLoaded', switchToResultsTab);
             </script>
             """
             st.components.v1.html(js_code, height=0)
-            # Reset the flag after switching
+            # Reset the flag after attempting the switch
             st.session_state["switch_to_results"] = False
 
     with tab2:
@@ -313,8 +338,8 @@ def main():
                         })
 
                         st.subheader("Model Performance")
-                        st.write(f"Heavy Machine MAE: {heavy_mae:.2f}")
-                        st.write(f"Medium Machine MAE: {medium_mae:.2f}")
+                        st.write(f"Heavy Machine MAE (Validation): {heavy_mae:.2f}")
+                        st.write(f"Medium Machine MAE (Validation): {medium_mae:.2f}")
 
                         # Visualizations
                         st.subheader("Energy Usage")
