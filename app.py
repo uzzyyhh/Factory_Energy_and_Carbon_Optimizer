@@ -109,7 +109,7 @@ class CarbonOptimizer:
 
     def update(self, state, action, reward, next_state):
         if state not in self.q_table:
-            self.q_table[state] = {a: 0 for a in the.actions}
+            self.q_table[state] = {a: 0 for a in self.actions}
         if next_state not in self.q_table:
             self.q_table[next_state] = {a: 0 for a in self.actions}
         current_q = self.q_table[state][action]
@@ -156,7 +156,7 @@ def create_docx_from_markdown(markdown_text):
                 doc.add_heading(line[2:], level=1)
             elif line.startswith('## '):
                 doc.add_heading(line[3:], level=2)
-            elif line.startswith('## '):
+            elif line.startswith('### '):
                 doc.add_heading(line[4:], level=3)
             elif line.startswith('- '):
                 doc.add_paragraph(line[2:], style='ListBullet')
