@@ -273,7 +273,7 @@ def main():
         st.cache_resource.clear()
         st.rerun()
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["Simulation", "Results", "Carbon Impact", "Documentation", "Edge Cases"])
+    tab1, tab2, tab3, tab5, tab4 = st.tabs(["Simulation", "Results", "Carbon Impact", "Edge Cases", "Documentation"])
 
     with tab1:
         st.header("Factory Setup")
@@ -304,16 +304,21 @@ def main():
 
     with tab2:
         if "df" in st.session_state and "params" in st.session_state:
-            df = st.session_state["df"]
+            df = st.session_state["df"].copy()  # Ensure a fresh copy
             params = st.session_state["params"]
             st.header("Optimization Results")
             required_cols = ["Shift", "Hour", "Solar_Available", "CO2_Emissions", "Intended_Heavy_On", "Intended_Medium_On",
-                           "Day_of_Week", "Heavy_On", "Medium_On", "Energy_Heavy", "Energy_Medium", "HVAC_Energy",
-                           "Lighting_Energy", "Temperature", "HVAC_Inefficient", "Is_Working_Hours", "Solar_Used", "Grid_Energy"]
+                            "Day_of_Week", "Heavy_On", "Medium_On", "Energy_Heavy", "Energy_Medium", "HVAC_Energy",
+                            "Lighting_Energy", "Temperature", "HVAC_Inefficient", "Is_Working_Hours", "Solar_Used", "Grid_Energy"]
             if not all(col in df.columns for col in required_cols):
                 st.error("Missing required columns. Please re-run the simulation.")
             else:
                 try:
+                    # Ensure new features are computed if missing
+                    if "Solar_Utilization" not in df.columns or "Temp_Deviation" not in df.columns:
+                        df["Solar_Utilization"] = df["Solar_Used"] / (df["Solar_Available"] + 1e-6)
+                        df["Temp_Deviation"] = df["Temperature"] - 22
+
                     with st.spinner("Training models..."):
                         heavy_model, heavy_mae, heavy_r2, heavy_importance = train_model(df, "Intended_Heavy_On", params["model_type"], "heavy")
                         medium_model, medium_mae, medium_r2, medium_importance = train_model(df, "Intended_Medium_On", params["model_type"], "medium")
@@ -379,11 +384,11 @@ def main():
 
                         st.table({
                             "Metric": ["Baseline Energy (kWh)", "Optimized Energy (kWh)", "Energy Savings (kWh)", "Savings (%)",
-                                       "Cost Savings ($)", "Baseline CO2 (kg)", "Optimized CO2 (kg)", "CO2 Savings (kg)",
-                                       "Trees Equivalent"],
+                                    "Cost Savings ($)", "Baseline CO2 (kg)", "Optimized CO2 (kg)", "CO2 Savings (kg)",
+                                    "Trees Equivalent"],
                             "Value": [f"{baseline_energy:.2f}", f"{optimized_energy:.2f}", f"{energy_savings:.2f}",
-                                      f"{savings_percent:.2f}", f"{cost_savings:.2f}", f"{baseline_co2:.2f}",
-                                      f"{optimized_co2:.2f}", f"{co2_savings:.2f}", f"{trees_equivalent:.2f}"]
+                                    f"{savings_percent:.2f}", f"{cost_savings:.2f}", f"{baseline_co2:.2f}",
+                                    f"{optimized_co2:.2f}", f"{co2_savings:.2f}", f"{trees_equivalent:.2f}"]
                         })
 
                         st.subheader("Energy Usage")
@@ -396,7 +401,7 @@ def main():
                         st.subheader("Energy Breakdown")
                         fig_breakdown = go.Figure()
                         for col, name, color in [("Energy_Heavy", "Heavy Machines", "blue"), ("Energy_Medium", "Medium Machines", "orange"),
-                                               ("HVAC_Energy", "HVAC", "green"), ("Lighting_Energy", "Lighting", "purple")]:
+                                              ("HVAC_Energy", "HVAC", "green"), ("Lighting_Energy", "Lighting", "purple")]:
                             fig_breakdown.add_trace(go.Scatter(x=df["Timestamp"], y=df[col], name=name, stackgroup="one", line=dict(color=color)))
                         fig_breakdown.update_layout(title="Baseline Energy Breakdown (kW)", yaxis_title="Energy (kW)")
                         st.plotly_chart(fig_breakdown, use_container_width=True)
