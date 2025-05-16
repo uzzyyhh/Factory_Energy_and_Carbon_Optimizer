@@ -54,22 +54,20 @@ The Factory Energy & Carbon Optimizer is a Streamlit web application that:
 ## Installation
 
 1. Clone the repository:
-```bash
-git clone https://github.com/yourusername/factory-energy-optimizer.git
-cd factory-energy-optimizer
+```
+git clone https://github.com/uzzyyhh/Factory_Energy_and_Carbon_Optimizer.git
+cd Factory_Energy_and_Carbon_Optimizer
 Create and activate a virtual environment:
 
-bash
 python -m venv venv
 source venv/bin/activate  # On Windows use `venv\Scripts\activate`
 Install dependencies:
 
-bash
 pip install -r requirements.txt
+
 Usage
 Run the Streamlit application:
 
-bash
 streamlit run app.py
 Configure your factory parameters in the web interface:
 
