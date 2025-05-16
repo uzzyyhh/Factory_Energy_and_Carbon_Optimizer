@@ -9,6 +9,7 @@ from sklearn.preprocessing import OneHotEncoder
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from sklearn.metrics import mean_absolute_error
+from sklearn.model_selection import train_test_split
 import joblib
 import logging
 from datetime import datetime
@@ -124,15 +125,18 @@ def train_model(df, target, model_type, cache_key):
         X = data[["Shift", "Hour", "Day_of_Week"]]
         y = data[target]
 
+        # Split data into training and testing sets
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
         preprocessor = ColumnTransformer(
             transformers=[("shift", OneHotEncoder(drop="first", sparse_output=False), ["Shift"])],
             remainder="passthrough"
         )
         model = RandomForestRegressor(n_estimators=100, random_state=42) if model_type == "Random Forest" else LinearRegression()
         pipeline = Pipeline([("preprocessor", preprocessor), ("regressor", model)])
-        pipeline.fit(X, y)
-        y_pred = pipeline.predict(X)
-        mae = mean_absolute_error(y, y_pred)
+        pipeline.fit(X_train, y_train)
+        y_pred = pipeline.predict(X_test)
+        mae = mean_absolute_error(y_test, y_pred)
         joblib.dump(pipeline, f"model_{target}_{model_type.replace(' ', '_')}.joblib")
         return pipeline, mae
     except Exception as e:
@@ -251,7 +255,6 @@ def main():
                                       f"{savings_percent:.2f}", f"{cost_savings:.2f}", f"{baseline_co2:.2f}",
                                       f"{optimized_co2:.2f}", f"{co2_savings:.2f}", f"{trees_equivalent:.2f}"]
                         })
-
 
                         # Visualizations
                         st.subheader("Energy Usage")
