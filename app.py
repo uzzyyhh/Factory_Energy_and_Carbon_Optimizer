@@ -174,81 +174,89 @@ def create_docx_from_markdown(markdown_text):
 def main():
     st.set_page_config(page_title="Factory Energy & Carbon Optimizer", layout="wide")
 
-    # Custom CSS for dark theme with gradient
+    # Custom CSS for classic, aesthetically pleasing dark theme
     st.markdown("""
         <style>
         /* Dark gradient background for the main app */
         .stApp {
-            background: linear-gradient(135deg, #1A237E 0%, #000000 100%);
-            color: #E0E0E0;
-            font-family: 'Arial', sans-serif;
+            background: linear-gradient(135deg, #1C2526 0%, #2F3C4B 100%);
+            color: #F5F5F5;
+            font-family: 'Helvetica', sans-serif;
         }
-        /* Bright header styling for contrast */
+        /* Classic header styling with serif font */
         h1, h2, h3 {
-            color: #FFFFFF !important;
-            font-weight: bold;
+            color: #F5F5F5 !important;
+            font-family: 'Georgia', serif;
+            font-weight: normal;
         }
-        /* Button styling with cyan accent */
+        /* Button styling with soft gold accent */
         .stButton > button {
-            background-color: #26A69A;
-            color: #FFFFFF;
-            border-radius: 8px;
-            border: none;
-            padding: 10px 20px;
+            background-color: #D4A017;
+            color: #1C2526;
+            border-radius: 5px;
+            border: 1px solid #F5F5F5;
+            padding: 12px 24px;
+            font-family: 'Helvetica', sans-serif;
             font-weight: bold;
-            transition: background-color 0.3s;
+            transition: background-color 0.3s, color 0.3s;
         }
         .stButton > button:hover {
-            background-color: #00897B;
+            background-color: #B28704;
+            color: #F5F5F5;
         }
-        /* Tab styling */
+        /* Tab styling with subtle teal */
         .stTabs [data-baseweb="tab"] {
-            background-color: #37474F;
+            background-color: #2F3C4B;
             color: #B0BEC5;
             border-radius: 5px;
             margin: 5px;
-            padding: 10px;
+            padding: 12px;
+            font-family: 'Helvetica', sans-serif;
         }
         .stTabs [data-baseweb="tab"][aria-selected="true"] {
-            background-color: #26A69A;
-            color: #FFFFFF;
+            background-color: #4A7A8C;
+            color: #F5F5F5;
             font-weight: bold;
         }
         /* Input and slider styling */
         .stNumberInput, .stSlider, .stSelectbox {
-            background-color: #263238;
+            background-color: #2F3C4B;
             border-radius: 5px;
-            padding: 10px;
+            padding: 12px;
+            border: 1px solid #4A7A8C;
         }
         .stNumberInput label, .stSlider label, .stSelectbox label {
-            color: #FFFFFF !important;
+            color: #F5F5F5 !important;
+            font-family: 'Helvetica', sans-serif;
             font-weight: bold;
         }
         /* Table styling */
         .stTable {
-            background-color: #37474F;
+            background-color: #2F3C4B;
             border-radius: 5px;
-            padding: 10px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.3);
-            color: #E0E0E0;
+            padding: 12px;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+            color: #F5F5F5;
         }
         /* Plotly chart dark background */
         .js-plotly-plot .plotly .main-svg {
-            background: #263238 !important;
+            background: #2F3C4B !important;
         }
         /* Sidebar dark gradient */
         .css-1d391kg {
-            background: linear-gradient(135deg, #283593 0%, #000000 100%);
+            background: linear-gradient(135deg, #2F3C4B 0%, #1C2526 100%);
         }
-        /* Ensure text inputs and dropdowns are readable */
+        /* Text inputs and dropdowns */
         .stTextInput input, .stSelectbox div[data-baseweb="select"] > div {
-            background-color: #263238;
-            color: #E0E0E0;
-            border: 1px solid #546E7A;
+            background-color: #2F3C4B;
+            color: #F5F5F5;
+            border: 1px solid #4A7A8C;
+            border-radius: 5px;
         }
-        /* Markdown text color */
+        /* Markdown text */
         .stMarkdown {
-            color: #E0E0E0;
+            color: #F5F5F5;
+            font-family: 'Helvetica', sans-serif;
         }
         </style>
     """, unsafe_allow_html=True)
@@ -343,7 +351,7 @@ def main():
                             df["HVAC_Inefficient"] == 0, df["HVAC_Energy"], 20 + 10 * np.maximum(df["Temperature"] - 22, 0)
                         )
                         df["Optimized_Lighting_Energy"] = np.where(df["Is_Working_Hours"] | (df["Lighting_Energy"] == 10), df["Lighting_Energy"], 10)
-                        df["Optimized_Total_Energy"] = df[["Optimized_Energy_Heavy", "Optimized_Medium_On", "Optimized_HVAC_Energy", "Optimized_Lighting_Energy"]].sum(axis=1)
+                        df["Optimized_Total_Energy"] = df[["Optimized_Energy_Heavy", "Optimized_Energy_Medium", "Optimized_HVAC_Energy", "Optimized_Lighting_Energy"]].sum(axis=1)
                         df["Optimized_Grid_Energy"] = np.maximum(0, df["Optimized_Total_Energy"] - df["Solar_Used"])
                         df["Optimized_CO2_Emissions"] = df["Optimized_Grid_Energy"] * GRID_EMISSION_FACTOR + df["Solar_Used"] * SOLAR_EMISSION_FACTOR
 
@@ -369,50 +377,50 @@ def main():
                                       f"{optimized_co2:.2f}", f"{co2_savings:.2f}", f"{trees_equivalent:.2f}"]
                         })
 
-                        # Visualizations with dark theme
+                        # Visualizations with classic theme
                         st.subheader("Energy Usage")
                         fig_energy = go.Figure()
-                        fig_energy.add_trace(go.Scatter(x=df["Timestamp"], y=df["Total_Energy"], name="Baseline", line=dict(color="#EF5350")))
-                        fig_energy.add_trace(go.Scatter(x=df["Timestamp"], y=df["Optimized_Total_Energy"], name="Optimized", line=dict(color="#26A69A")))
+                        fig_energy.add_trace(go.Scatter(x=df["Timestamp"], y=df["Total_Energy"], name="Baseline", line=dict(color="#D4A017")))
+                        fig_energy.add_trace(go.Scatter(x=df["Timestamp"], y=df["Optimized_Total_Energy"], name="Optimized", line=dict(color="#4A7A8C")))
                         fig_energy.update_layout(
                             title="Energy Usage (kW)",
                             yaxis_title="Energy (kW)",
-                            paper_bgcolor="#263238",
-                            plot_bgcolor="#263238",
-                            font=dict(color="#E0E0E0"),
-                            xaxis=dict(gridcolor="#546E7A"),
-                            yaxis=dict(gridcolor="#546E7A")
+                            paper_bgcolor="#2F3C4B",
+                            plot_bgcolor="#2F3C4B",
+                            font=dict(color="#F5F5F5", family="Helvetica"),
+                            xaxis=dict(gridcolor="#4A7A8C"),
+                            yaxis=dict(gridcolor="#4A7A8C")
                         )
                         st.plotly_chart(fig_energy, use_container_width=True)
 
                         st.subheader("Energy Breakdown")
                         fig_breakdown = go.Figure()
-                        for col, name, color in [("Energy_Heavy", "Heavy Machines", "#42A5F5"),
-                                               ("Energy_Medium", "Medium Machines", "#FFCA28"),
-                                               ("HVAC_Energy", "HVAC", "#66BB6A"),
+                        for col, name, color in [("Energy_Heavy", "Heavy Machines", "#D4A017"),
+                                               ("Energy_Medium", "Medium Machines", "#F06292"),
+                                               ("HVAC_Energy", "HVAC", "#4A7A8C"),
                                                ("Lighting_Energy", "Lighting", "#AB47BC")]:
                             fig_breakdown.add_trace(go.Scatter(x=df["Timestamp"], y=df[col], name=name, stackgroup="one", line=dict(color=color)))
                         fig_breakdown.update_layout(
                             title="Baseline Energy Breakdown (kW)",
                             yaxis_title="Energy (kW)",
-                            paper_bgcolor="#263238",
-                            plot_bgcolor="#263238",
-                            font=dict(color="#E0E0E0"),
-                            xaxis=dict(gridcolor="#546E7A"),
-                            yaxis=dict(gridcolor="#546E7A")
+                            paper_bgcolor="#2F3C4B",
+                            plot_bgcolor="#2F3C4B",
+                            font=dict(color="#F5F5F5", family="Helvetica"),
+                            xaxis=dict(gridcolor="#4A7A8C"),
+                            yaxis=dict(gridcolor="#4A7A8C")
                         )
                         st.plotly_chart(fig_breakdown, use_container_width=True)
 
                         st.subheader("Daily Savings")
                         df["Date"] = df["Timestamp"].dt.date
                         daily_savings = df.groupby("Date").apply(lambda x: x["Total_Energy"].sum() - x["Optimized_Total_Energy"].sum()).reset_index(name="Savings")
-                        fig_savings = px.bar(daily_savings, x="Date", y="Savings", title="Daily Energy Savings (kWh)", color_discrete_sequence=["#26A69A"])
+                        fig_savings = px.bar(daily_savings, x="Date", y="Savings", title="Daily Energy Savings (kWh)", color_discrete_sequence=["#4A7A8C"])
                         fig_savings.update_layout(
-                            paper_bgcolor="#263238",
-                            plot_bgcolor="#263238",
-                            font=dict(color="#E0E0E0"),
-                            xaxis=dict(gridcolor="#546E7A"),
-                            yaxis=dict(gridcolor="#546E7A")
+                            paper_bgcolor="#2F3C4B",
+                            plot_bgcolor="#2F3C4B",
+                            font=dict(color="#F5F5F5", family="Helvetica"),
+                            xaxis=dict(gridcolor="#4A7A8C"),
+                            yaxis=dict(gridcolor="#4A7A8C")
                         )
                         st.plotly_chart(fig_savings, use_container_width=True)
 
@@ -438,16 +446,16 @@ def main():
 
                     st.subheader("Emissions Over Time")
                     fig_co2 = go.Figure()
-                    fig_co2.add_trace(go.Scatter(x=df["Timestamp"], y=df["CO2_Emissions"], name="Baseline", line=dict(color="#EF5350")))
-                    fig_co2.add_trace(go.Scatter(x=df["Timestamp"], y=df["Optimized_CO2_Emissions"], name="Optimized", line=dict(color="#26A69A")))
+                    fig_co2.add_trace(go.Scatter(x=df["Timestamp"], y=df["CO2_Emissions"], name="Baseline", line=dict(color="#D4A017")))
+                    fig_co2.add_trace(go.Scatter(x=df["Timestamp"], y=df["Optimized_CO2_Emissions"], name="Optimized", line=dict(color="#4A7A8C")))
                     fig_co2.update_layout(
                         title="CO2 Emissions (kg)",
                         yaxis_title="CO2 (kg)",
-                        paper_bgcolor="#263238",
-                        plot_bgcolor="#263238",
-                        font=dict(color="#E0E0E0"),
-                        xaxis=dict(gridcolor="#546E7A"),
-                        yaxis=dict(gridcolor="#546E7A")
+                        paper_bgcolor="#2F3C4B",
+                        plot_bgcolor="#2F3C4B",
+                        font=dict(color="#F5F5F5", family="Helvetica"),
+                        xaxis=dict(gridcolor="#4A7A8C"),
+                        yaxis=dict(gridcolor="#4A7A8C")
                     )
                     st.plotly_chart(fig_co2, use_container_width=True)
 
@@ -459,11 +467,11 @@ def main():
                         "Lighting": (df["Lighting_Energy"] * GRID_EMISSION_FACTOR).sum()
                     }
                     fig_pie = px.pie(names=list(co2_breakdown.keys()), values=list(co2_breakdown.values()), title="Baseline CO2 Breakdown",
-                                    color_discrete_sequence=["#42A5F5", "#FFCA28", "#66BB6A", "#AB47BC"])
+                                    color_discrete_sequence=["#D4A017", "#F06292", "#4A7A8C", "#AB47BC"])
                     fig_pie.update_layout(
-                        paper_bgcolor="#263238",
-                        plot_bgcolor="#263238",
-                        font=dict(color="#E0E0E0")
+                        paper_bgcolor="#2F3C4B",
+                        plot_bgcolor="#2F3C4B",
+                        font=dict(color="#F5F5F5", family="Helvetica")
                     )
                     st.plotly_chart(fig_pie, use_container_width=True)
 
@@ -478,23 +486,23 @@ def main():
                         x=daily_co2["Date"],
                         y=daily_co2["CO2_Emissions"],
                         name="Baseline",
-                        marker_color="#EF5350"
+                        marker_color="#D4A017"
                     ))
                     fig_daily_co2.add_trace(go.Bar(
                         x=daily_co2["Date"],
                         y=daily_co2["Optimized_CO2_Emissions"],
                         name="Optimized",
-                        marker_color="#26A69A"
+                        marker_color="#4A7A8C"
                     ))
                     fig_daily_co2.update_layout(
                         title="Daily CO2 Emissions Comparison (kg)",
                         yaxis_title="CO2 Emissions (kg)",
                         barmode="group",
-                        paper_bgcolor="#263238",
-                        plot_bgcolor="#263238",
-                        font=dict(color="#E0E0E0"),
-                        xaxis=dict(gridcolor="#546E7A"),
-                        yaxis=dict(gridcolor="#546E7A")
+                        paper_bgcolor="#2F3C4B",
+                        plot_bgcolor="#2F3C4B",
+                        font=dict(color="#F5F5F5", family="Helvetica"),
+                        xaxis=dict(gridcolor="#4A7A8C"),
+                        yaxis=dict(gridcolor="#4A7A8C")
                     )
                     st.plotly_chart(fig_daily_co2, use_container_width=True)
 
