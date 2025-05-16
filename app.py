@@ -109,7 +109,7 @@ class CarbonOptimizer:
 
     def update(self, state, action, reward, next_state):
         if state not in self.q_table:
-            self.q_table[state] = {a: 0 for a in self.actions}
+            self.q_table[state] = {a: 0 for a in the.actions}
         if next_state not in self.q_table:
             self.q_table[next_state] = {a: 0 for a in self.actions}
         current_q = self.q_table[state][action]
@@ -156,7 +156,7 @@ def create_docx_from_markdown(markdown_text):
                 doc.add_heading(line[2:], level=1)
             elif line.startswith('## '):
                 doc.add_heading(line[3:], level=2)
-            elif line.startswith('### '):
+            elif line.startswith('## '):
                 doc.add_heading(line[4:], level=3)
             elif line.startswith('- '):
                 doc.add_paragraph(line[2:], style='ListBullet')
@@ -342,14 +342,31 @@ def main():
                     fig_pie = px.pie(names=list(co2_breakdown.keys()), values=list(co2_breakdown.values()), title="Baseline CO2 Breakdown")
                     st.plotly_chart(fig_pie, use_container_width=True)
 
-                    st.subheader("Baseline vs. Optimized Emissions")
-                    fig_comparison_pie = px.pie(
-                        names=["Baseline CO2", "Optimized CO2"],
-                        values=[baseline_co2, optimized_co2],
-                        title="Baseline vs. Optimized CO2 Emissions",
-                        color_discrete_sequence=["red", "green"]
+                    st.subheader("Daily CO2 Emissions Comparison")
+                    df["Date"] = df["Timestamp"].dt.date
+                    daily_co2 = df.groupby("Date").agg({
+                        "CO2_Emissions": "sum",
+                        "Optimized_CO2_Emissions": "sum"
+                    }).reset_index()
+                    fig_daily_co2 = go.Figure()
+                    fig_daily_co2.add_trace(go.Bar(
+                        x=daily_co2["Date"],
+                        y=daily_co2["CO2_Emissions"],
+                        name="Baseline",
+                        marker_color="red"
+                    ))
+                    fig_daily_co2.add_trace(go.Bar(
+                        x=daily_co2["Date"],
+                        y=daily_co2["Optimized_CO2_Emissions"],
+                        name="Optimized",
+                        marker_color="green"
+                    ))
+                    fig_daily_co2.update_layout(
+                        title="Daily CO2 Emissions Comparison (kg)",
+                        yaxis_title="CO2 Emissions (kg)",
+                        barmode="group"
                     )
-                    st.plotly_chart(fig_comparison_pie, use_container_width=True)
+                    st.plotly_chart(fig_daily_co2, use_container_width=True)
 
                     st.subheader("Sustainability Impact")
                     st.markdown(f"""
@@ -415,7 +432,7 @@ def main():
           - Daily Savings: Bar chart of daily energy savings.  
           - Emissions Over Time: Baseline vs. optimized CO2 emissions.  
           - Emissions Breakdown: Pie chart of CO2 by component.  
-          - Baseline vs. Optimized Emissions: Pie chart comparing total CO2 emissions.  
+          - Daily CO2 Emissions Comparison: Bar chart comparing daily baseline and optimized CO2 emissions.  
         - **Exportable Data**: CSV file with all simulation and optimization metrics; DOCX file with this documentation.  
 
         **AI/ML Approach**  
