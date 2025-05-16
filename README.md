@@ -54,7 +54,6 @@ The Factory Energy & Carbon Optimizer is a Streamlit web application that:
 ## Installation
 
 1. Clone the repository:
-```
 git clone https://github.com/uzzyyhh/Factory_Energy_and_Carbon_Optimizer.git
 cd Factory_Energy_and_Carbon_Optimizer
 Create and activate a virtual environment:
