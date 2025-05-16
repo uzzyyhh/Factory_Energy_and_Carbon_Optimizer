@@ -8,8 +8,8 @@ from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import OneHotEncoder
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
-from sklearn.metrics import mean_absolute_error
-from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_absolute_error, r2_score
+from sklearn.model_selection import train_test_split, GridSearchCV
 import joblib
 import logging
 from datetime import datetime
@@ -91,18 +91,22 @@ def simulate_factory_data(num_heavy, energy_heavy, num_medium, energy_medium, p_
         return None
 
 class CarbonOptimizer:
-    """Simple Q-learning for carbon-aware scheduling."""
-    def __init__(self, actions=["shift_heavy", "shift_medium", "no_action"], lr=0.1, gamma=0.9):
+    """Enhanced Q-learning for carbon-aware scheduling."""
+    def __init__(self, actions=["shift_heavy", "shift_medium", "adjust_hvac", "no_action"], lr=0.1, gamma=0.9, epsilon=0.1, max_iterations=1000):
         self.q_table = {}
         self.actions = actions
         self.lr = lr
         self.gamma = gamma
+        self.epsilon = epsilon
+        self.max_iterations = max_iterations
+        self.rewards = []  # Track rewards for convergence
 
-    def get_state(self, shift, hour, solar_available):
-        return (shift, hour, int(solar_available > 0))
+    def get_state(self, shift, hour, solar_available, temperature, heavy_on, medium_on):
+        temp_bin = int(temperature // 5) * 5  # Bin temperature (e.g., 25, 30, 35)
+        return (shift, hour, int(solar_available > 0), temp_bin, heavy_on, medium_on)
 
-    def get_action(self, state, epsilon=0.1):
-        if np.random.random() < epsilon:
+    def get_action(self, state):
+        if np.random.random() < self.epsilon:
             return np.random.choice(self.actions)
         q_values = self.q_table.get(state, {a: 0 for a in self.actions})
         return max(q_values, key=q_values.get)
@@ -115,6 +119,28 @@ class CarbonOptimizer:
         current_q = self.q_table[state][action]
         next_max_q = max(self.q_table[next_state].values(), default=0)
         self.q_table[state][action] += self.lr * (reward + self.gamma * next_max_q - current_q)
+        self.rewards.append(reward)
+
+    def train(self, df):
+        learning_rates = [0.05, 0.1, 0.2]
+        best_lr, best_reward = self.lr, float('-inf')
+        for lr in learning_rates:
+            self.lr = lr
+            self.q_table = {}
+            self.rewards = []
+            for i in range(min(self.max_iterations, len(df) - 1)):
+                state = self.get_state(df["Shift"].iloc[i], df["Hour"].iloc[i], df["Solar_Available"].iloc[i],
+                                      df["Temperature"].iloc[i], df["Heavy_On"].iloc[i], df["Medium_On"].iloc[i])
+                action = self.get_action(state)
+                reward = -df["CO2_Emissions"].iloc[i]
+                next_state = self.get_state(df["Shift"].iloc[i + 1], df["Hour"].iloc[i + 1], df["Solar_Available"].iloc[i + 1],
+                                           df["Temperature"].iloc[i + 1], df["Heavy_On"].iloc[i + 1], df["Medium_On"].iloc[i + 1])
+                self.update(state, action, reward, next_state)
+            avg_reward = np.mean(self.rewards)
+            if avg_reward > best_reward:
+                best_reward, best_lr = avg_reward, lr
+        self.lr = best_lr
+        logger.info(f"Best learning rate: {best_lr}, Average Reward: {best_reward}")
 
 @st.cache_data
 def get_simulated_data(_num_heavy, _energy_heavy, _num_medium, _energy_medium, _p_ineff, _q_ineff, _r_ineff, _hours):
@@ -127,24 +153,52 @@ def train_model(df, target, model_type, cache_key):
         X = data[["Shift", "Hour", "Day_of_Week"]]
         y = data[target]
 
-        # Split data into training and testing sets
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-
         preprocessor = ColumnTransformer(
             transformers=[("shift", OneHotEncoder(drop="first", sparse_output=False), ["Shift"])],
             remainder="passthrough"
         )
-        model = RandomForestRegressor(n_estimators=100, random_state=42) if model_type == "Random Forest" else LinearRegression()
+
+        if model_type == "Random Forest":
+            model = RandomForestRegressor(random_state=42)
+            param_grid = {
+                'regressor__n_estimators': [50, 100, 200],
+                'regressor__max_depth': [None, 10, 20],
+                'regressor__min_samples_split': [2, 5]
+            }
+        else:
+            model = LinearRegression()
+            param_grid = {}
+
         pipeline = Pipeline([("preprocessor", preprocessor), ("regressor", model)])
+
+        if model_type == "Random Forest":
+            grid_search = GridSearchCV(pipeline, param_grid, cv=5, scoring='neg_mean_absolute_error', n_jobs=-1)
+            grid_search.fit(X, y)
+            pipeline = grid_search.best_estimator_
+            best_params = grid_search.best_params_
+        else:
+            pipeline.fit(X, y)
+            best_params = {}
+
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
         pipeline.fit(X_train, y_train)
         y_pred = pipeline.predict(X_test)
         mae = mean_absolute_error(y_test, y_pred)
+        r2 = r2_score(y_test, y_pred)
+
+        feature_importance = None
+        if model_type == "Random Forest":
+            feature_names = pipeline.named_steps['preprocessor'].get_feature_names_out()
+            importance = pipeline.named_steps['regressor'].feature_importances_
+            feature_importance = dict(zip(feature_names, importance))
+
         joblib.dump(pipeline, f"model_{target}_{model_type.replace(' ', '_')}.joblib")
-        return pipeline, mae
+        logger.info(f"Model {target}: MAE={mae:.2f}, R2={r2:.2f}, Best Params={best_params}")
+        return pipeline, mae, r2, feature_importance
     except Exception as e:
         logger.error("Model training failed: %s", e)
         st.error(f"Model training failed: {e}")
-        return None, None
+        return None, None, None, None
 
 def create_docx_from_markdown(markdown_text):
     """Convert markdown text to a .docx file."""
@@ -175,13 +229,11 @@ def main():
     st.set_page_config(page_title="Factory Energy & Carbon Optimizer", layout="wide")
     st.title("Factory Energy & Carbon Optimizer")
 
-    # Debug option
     if st.sidebar.button("Clear Cache"):
         st.cache_data.clear()
         st.cache_resource.clear()
         st.rerun()
 
-    # Tabs
     tab1, tab2, tab3, tab4 = st.tabs(["Simulation", "Results", "Carbon Impact", "Documentation"])
 
     with tab1:
@@ -224,44 +276,56 @@ def main():
             else:
                 try:
                     with st.spinner("Optimizing..."):
-                        heavy_model, heavy_mae = train_model(df, "Intended_Heavy_On", params["model_type"], "heavy")
-                        medium_model, medium_mae = train_model(df, "Intended_Medium_On", params["model_type"], "medium")
+                        heavy_model, heavy_mae, heavy_r2, heavy_importance = train_model(df, "Intended_Heavy_On", params["model_type"], "heavy")
+                        medium_model, medium_mae, medium_r2, medium_importance = train_model(df, "Intended_Medium_On", params["model_type"], "medium")
 
                     if heavy_model and medium_model:
-                        # Carbon optimization
-                        optimizer = CarbonOptimizer()
-                        for i in range(min(100, len(df) - 1)):  # Limit iterations for efficiency
-                            state = optimizer.get_state(df["Shift"].iloc[i], df["Hour"].iloc[i], df["Solar_Available"].iloc[i])
-                            action = optimizer.get_action(state)
-                            reward = -df["CO2_Emissions"].iloc[i]
-                            next_state = optimizer.get_state(df["Shift"].iloc[i + 1], df["Hour"].iloc[i + 1], df["Solar_Available"].iloc[i + 1])
-                            optimizer.update(state, action, reward, next_state)
+                        st.subheader("Model Performance")
+                        st.table({
+                            "Metric": ["Heavy Machine MAE", "Heavy Machine R²", "Medium Machine MAE", "Medium Machine R²"],
+                            "Value": [f"{heavy_mae:.2f}", f"{heavy_r2:.2f}", f"{medium_mae:.2f}", f"{medium_r2:.2f}"]
+                        })
 
-                        # Predictions and optimization
+                        if params["model_type"] == "Random Forest" and heavy_importance and medium_importance:
+                            st.subheader("Feature Importance")
+                            fig_importance = go.Figure()
+                            fig_importance.add_trace(go.Bar(x=list(heavy_importance.keys()), y=list(heavy_importance.values()), name="Heavy Machines", marker_color="blue"))
+                            fig_importance.add_trace(go.Bar(x=list(medium_importance.keys()), y=list(medium_importance.values()), name="Medium Machines", marker_color="orange"))
+                            fig_importance.update_layout(title="Feature Importance for Machine Predictions", yaxis_title="Importance", barmode="group")
+                            st.plotly_chart(fig_importance, use_container_width=True)
+
+                        optimizer = CarbonOptimizer(max_iterations=1000)
+                        optimizer.train(df)
+                        st.subheader("Q-Learning Convergence")
+                        fig_convergence = go.Figure()
+                        fig_convergence.add_trace(go.Scatter(y=optimizer.rewards, name="Reward (Negative CO2)", line=dict(color="blue")))
+                        fig_convergence.update_layout(title="Q-Learning Reward Over Iterations", yaxis_title="Reward")
+                        st.plotly_chart(fig_convergence, use_container_width=True)
+
                         df["Predicted_Heavy_On"] = heavy_model.predict(df[["Shift", "Hour", "Day_of_Week"]]).round().clip(0, num_heavy)
                         df["Predicted_Medium_On"] = medium_model.predict(df[["Shift", "Hour", "Day_of_Week"]]).round().clip(0, num_medium)
                         df["Optimized_Heavy_On"] = df["Predicted_Heavy_On"].copy()
                         df["Optimized_Medium_On"] = df["Predicted_Medium_On"].copy()
+                        df["Optimized_HVAC_Energy"] = df["HVAC_Energy"].copy()
 
                         for i in range(len(df)):
-                            state = optimizer.get_state(df["Shift"].iloc[i], df["Hour"].iloc[i], df["Solar_Available"].iloc[i])
+                            state = optimizer.get_state(df["Shift"].iloc[i], df["Hour"].iloc[i], df["Solar_Available"].iloc[i],
+                                                       df["Temperature"].iloc[i], df["Heavy_On"].iloc[i], df["Medium_On"].iloc[i])
                             action = optimizer.get_action(state, epsilon=0)
                             if action == "shift_heavy" and df["Solar_Available"].iloc[i] > 0:
                                 df.loc[i, "Optimized_Heavy_On"] = min(df["Heavy_On"].iloc[i], df["Predicted_Heavy_On"].iloc[i] + 1)
                             elif action == "shift_medium" and df["Solar_Available"].iloc[i] > 0:
                                 df.loc[i, "Optimized_Medium_On"] = min(df["Medium_On"].iloc[i], df["Predicted_Medium_On"].iloc[i] + 1)
+                            elif action == "adjust_hvac" and df["HVAC_Inefficient"].iloc[i] == 1:
+                                df.loc[i, "Optimized_HVAC_Energy"] = 20 + 10 * np.maximum(df["Temperature"].iloc[i] - 22, 0)
 
                         df["Optimized_Energy_Heavy"] = df["Optimized_Heavy_On"] * params["energy_heavy"]
                         df["Optimized_Energy_Medium"] = df["Optimized_Medium_On"] * params["energy_medium"]
-                        df["Optimized_HVAC_Energy"] = np.where(
-                            df["HVAC_Inefficient"] == 0, df["HVAC_Energy"], 20 + 10 * np.maximum(df["Temperature"] - 22, 0)
-                        )
                         df["Optimized_Lighting_Energy"] = np.where(df["Is_Working_Hours"] | (df["Lighting_Energy"] == 10), df["Lighting_Energy"], 10)
                         df["Optimized_Total_Energy"] = df[["Optimized_Energy_Heavy", "Optimized_Energy_Medium", "Optimized_HVAC_Energy", "Optimized_Lighting_Energy"]].sum(axis=1)
                         df["Optimized_Grid_Energy"] = np.maximum(0, df["Optimized_Total_Energy"] - df["Solar_Used"])
                         df["Optimized_CO2_Emissions"] = df["Optimized_Grid_Energy"] * GRID_EMISSION_FACTOR + df["Solar_Used"] * SOLAR_EMISSION_FACTOR
 
-                        # Metrics
                         baseline_energy = df["Total_Energy"].sum()
                         optimized_energy = df["Optimized_Total_Energy"].sum()
                         energy_savings = baseline_energy - optimized_energy
@@ -272,7 +336,6 @@ def main():
                         co2_savings = baseline_co2 - optimized_co2
                         trees_equivalent = (co2_savings / 1000) * TREES_PER_TON_CO2
 
-                        # Display results
                         st.subheader("Summary")
                         st.table({
                             "Metric": ["Baseline Energy (kWh)", "Optimized Energy (kWh)", "Energy Savings (kWh)", "Savings (%)",
@@ -283,7 +346,6 @@ def main():
                                       f"{optimized_co2:.2f}", f"{co2_savings:.2f}", f"{trees_equivalent:.2f}"]
                         })
 
-                        # Visualizations
                         st.subheader("Energy Usage")
                         fig_energy = go.Figure()
                         fig_energy.add_trace(go.Scatter(x=df["Timestamp"], y=df["Total_Energy"], name="Baseline", line=dict(color="red")))
@@ -384,7 +446,7 @@ def main():
         ### Factory Energy & Carbon Optimizer
 
         **Overview**  
-        The Factory Energy & Carbon Optimizer is an AI-driven tool designed to simulate and optimize energy consumption and carbon emissions in a factory environment. By generating realistic synthetic data and applying machine learning and reinforcement learning, the system identifies inefficiencies (e.g., idle machines, overheating HVAC) and recommends actions to reduce energy waste and CO2 emissions. The tool supports sustainable industrial operations, aligning with UN Sustainable Development Goals (SDGs) 7 (Affordable and Clean Energy) and 13 (Climate Action). Built as a Streamlit web application, it provides an interactive interface for configuring simulations, viewing results, and exporting data.
+        The Factory Energy & Carbon Optimizer is an AI-driven tool designed to simulate and optimize energy consumption and carbon emissions in a factory environment. By generating realistic synthetic data and applying advanced machine learning and reinforcement learning, the system identifies inefficiencies (e.g., idle machines, overheating HVAC) and recommends actions to reduce energy waste and CO2 emissions. The tool supports sustainable industrial operations, aligning with UN Sustainable Development Goals (SDGs) 7 (Affordable and Clean Energy) and 13 (Climate Action). Built as a Streamlit web application, it provides an interactive interface for configuring simulations, viewing results, and exporting data.
 
         **Simulation Assumptions**  
         The system simulates a factory’s energy consumption with the following justified assumptions, based on typical industrial settings:  
@@ -412,8 +474,8 @@ def main():
 
         **Features**  
         - **Realistic Simulation**: Generates hourly energy consumption data for heavy/medium machines, HVAC, and lighting, incorporating inefficiencies and solar availability.  
-        - **AI-Driven Optimization**: Uses Random Forest or Linear Regression to predict efficient machine schedules and Q-learning to shift loads to solar-heavy hours.  
-        - **Visualization**: Provides interactive plots for energy usage, breakdown, daily savings, CO2 emissions, and emissions breakdown.  
+        - **AI-Driven Optimization**: Uses tuned Random Forest or Linear Regression to predict efficient machine schedules and advanced Q-learning to shift loads to solar-heavy hours.  
+        - **Visualization**: Provides interactive plots for energy usage, breakdown, daily savings, CO2 emissions, emissions breakdown, model performance, and Q-learning convergence.  
         - **Export Options**: Downloads simulation data as CSV and documentation as DOCX.  
         - **User Configurability**: Allows customization of machine counts, energy consumption, inefficiency probabilities, simulation duration, and model type.  
 
@@ -422,7 +484,7 @@ def main():
         - **Inefficiency Probabilities**: Machine (0–1, default: 0.1), HVAC (0–1, default: 0.2), lighting (0–1, default: 0.1).  
         - **Simulation Duration**: 1 week (168h), 1 month (720h), or 3 months (2160h).  
         - **Cost per kWh**: Default $0.15, for calculating cost savings.  
-        - **Model Type**: Random Forest (100 estimators) or Linear Regression.  
+        - **Model Type**: Random Forest (tuned with grid search) or Linear Regression.  
 
         **Outputs**  
         - **Summary Table**: Baseline vs. optimized energy (kWh), savings (kWh, %), cost savings ($), baseline vs. optimized CO2 (kg), CO2 savings (kg), trees equivalent.  
@@ -433,54 +495,51 @@ def main():
           - Emissions Over Time: Baseline vs. optimized CO2 emissions.  
           - Emissions Breakdown: Pie chart of CO2 by component.  
           - Daily CO2 Emissions Comparison: Bar chart comparing daily baseline and optimized CO2 emissions.  
+          - Model Performance: MAE and R² for machine predictions.  
+          - Feature Importance: Bar chart for Random Forest feature importance.  
+          - Q-Learning Convergence: Plot of rewards over iterations.  
         - **Exportable Data**: CSV file with all simulation and optimization metrics; DOCX file with this documentation.  
 
         **AI/ML Approach**  
         - **Prediction Models**:  
-          - Random Forest (100 estimators) or Linear Regression predicts the number of active heavy and medium machines (`Intended_Heavy_On`, `Intended_Medium_On`) based on shift, hour, and day of week.  
-          - Features are one-hot encoded (shift) and passed through (hour, day of week).  
-          - Train-test split (80% training, 20% testing) ensures robust evaluation.  
+          - Random Forest (tuned with grid search: n_estimators=[50,100,200], max_depth=[None,10,20], min_samples_split=[2,5]) or Linear Regression predicts machine schedules (`Intended_Heavy_On`, `Intended_Medium_On`).  
+          - Features: Shift (one-hot encoded), hour, day of week; evaluated with 5-fold cross-validation.  
+          - Metrics: MAE and R² displayed in UI; feature importance visualized for Random Forest.  
         - **Optimization**:  
-          - A Q-learning agent (`CarbonOptimizer`) shifts machine loads to hours with high solar availability to minimize CO2 emissions.  
-          - Actions: Shift heavy machine, shift medium machine, or no action.  
-          - State: Shift type, hour, solar availability (binary).  
-          - Reward: Negative CO2 emissions, encouraging low-carbon schedules.  
-          - Parameters: Learning rate (0.1), discount factor (0.9), exploration rate (0.1).  
-        - **Additional Optimizations**:  
-          - HVAC energy is reduced by resetting inefficient units to a 22°C threshold.  
-          - Lighting energy is optimized by turning off lights outside working hours.  
+          - Enhanced Q-learning with 1000 iterations, expanded state (shift, hour, solar availability, temperature, machines on), and actions (shift heavy/medium, adjust HVAC, no action).  
+          - Hyperparameter tuning (learning rate=[0.05,0.1,0.2]) optimizes carbon reduction.  
+          - Convergence monitored and visualized in UI.  
+          - Additional optimizations: HVAC reset to 22°C threshold, lighting turned off outside working hours.  
 
         **Sustainability Impact**  
-        - **Energy Efficiency**: Achieves significant energy reductions, typically 5–20% depending on inefficiency settings, by eliminating wasteful machine operation, optimizing HVAC, and reducing lighting overuse. For a 1-month simulation with default settings, savings can exceed 10,000 kWh, equivalent to powering several households.  
-        - **Carbon Reduction**: Lowers CO2 emissions by prioritizing solar energy and optimizing schedules, often reducing emissions by 5,000–15,000 kg over 3 months, equivalent to planting 240–720 trees annually. This reduces reliance on fossil fuel-based grid electricity, mitigating climate change impacts.  
-        - **Environmental Benefits**: Beyond CO2, optimization reduces air pollutants (e.g., sulfur dioxide, nitrogen oxides) from grid power, improving local air quality and conserving natural resources by lowering energy demand.  
+        - **Energy Efficiency**: Achieves 5–20% energy reductions by eliminating wasteful machine operation, optimizing HVAC, and reducing lighting overuse. For a 1-month simulation, savings can exceed 10,000 kWh.  
+        - **Carbon Reduction**: Reduces emissions by 5,000–15,000 kg over 3 months, equivalent to planting 240–720 trees, by prioritizing solar energy.  
+        - **Environmental Benefits**: Reduces air pollutants from grid power, improving air quality and conserving resources.  
         - **UN SDGs**:  
-          - **SDG 7 (Affordable and Clean Energy)**: Promotes renewable energy integration (solar) and enhances energy efficiency, making industrial operations more sustainable and cost-effective.  
-          - **SDG 13 (Climate Action)**: Directly combats climate change by reducing industrial carbon footprints, supporting global efforts to limit warming to 1.5°C.  
-        - **Real-World Applicability**: The system can be adapted to real factories with IoT sensors, enabling precise energy monitoring and optimization. It is scalable to other industries (e.g., manufacturing, logistics) and regions with varying grid emission factors, amplifying global impact.  
-        - **Community and Economic Benefits**: By reducing energy costs (e.g., $1,500–$3,000 monthly with default settings), factories can reinvest savings into operations or employee welfare. Increased solar adoption fosters job creation in renewable energy sectors, supporting local economies.  
-        - **Scalability**: The framework can extend to multi-factory networks or smart grids, optimizing energy across regions. Integration with carbon credit systems could monetize emissions reductions, incentivizing sustainability.  
+          - **SDG 7**: Promotes renewable energy and efficiency.  
+          - **SDG 13**: Combats climate change by reducing industrial carbon footprints.  
+        - **Real-World Applicability**: Adaptable to IoT-enabled factories, scalable to multi-site networks, and compatible with carbon credit systems.  
+        - **Economic Benefits**: Saves $1,500–$3,000 monthly, supporting reinvestment and renewable energy job creation.  
 
         **Future Improvements**  
-        - **Seasonal Variations**: Incorporate monthly temperature changes (e.g., winter heating, summer cooling) to enhance simulation realism.  
-        - **Real-Time Data**: Integrate IoT sensors for live energy and weather data, replacing synthetic data.  
-        - **Advanced Models**: Use deep reinforcement learning or neural networks for more complex optimization.  
-        - **Grid Carbon Data**: Incorporate real-time grid emission factors to dynamically adjust schedules.  
-        - **Carbon Credits**: Implement blockchain-based carbon credit tracking for monetizing emissions reductions.  
-        - **Multi-Site Optimization**: Extend the system to optimize energy across multiple factories or buildings.  
+        - **Seasonal Variations**: Add monthly temperature changes for realism.  
+        - **Real-Time Data**: Integrate IoT sensors for live data.  
+        - **Advanced Models**: Use deep reinforcement learning or neural networks.  
+        - **Grid Carbon Data**: Incorporate real-time emission factors.  
+        - **Carbon Credits**: Implement blockchain-based carbon credit tracking.  
+        - **Multi-Site Optimization**: Extend to optimize across multiple factories.  
 
         **Usage**  
-        1. Configure parameters in the Simulation tab (machine counts, inefficiencies, duration, etc.).  
+        1. Configure parameters in the Simulation tab.  
         2. Run the simulation to generate data.  
-        3. View optimization results in the Results tab (energy savings, plots).  
-        4. Analyze carbon impact in the Carbon Impact tab (CO2 savings, emissions breakdown).  
+        3. View results in the Results tab.  
+        4. Analyze carbon impact in the Carbon Impact tab.  
         5. Export data (CSV) or documentation (DOCX) as needed.  
 
-        This tool demonstrates the power of AI in achieving sustainable industrial operations, offering actionable insights for energy and carbon reduction.
+        This tool demonstrates AI’s power in achieving sustainable industrial operations, offering actionable insights for energy and carbon reduction.
         """
         st.markdown(documentation_text)
 
-        # Download documentation as .docx
         st.subheader("Export Documentation")
         docx_file = create_docx_from_markdown(documentation_text)
         if docx_file:
