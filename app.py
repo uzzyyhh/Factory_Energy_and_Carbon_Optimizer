@@ -105,8 +105,9 @@ class CarbonOptimizer:
         temp_bin = int(temperature // 5) * 5  # Bin temperature (e.g., 25, 30, 35)
         return (shift, hour, int(solar_available > 0), temp_bin, heavy_on, medium_on)
 
-    def get_action(self, state):
-        if np.random.random() < self.epsilon:
+    def get_action(self, state, epsilon=None):
+        epsilon = self.epsilon if epsilon is None else epsilon
+        if np.random.random() < epsilon:
             return np.random.choice(self.actions)
         q_values = self.q_table.get(state, {a: 0 for a in self.actions})
         return max(q_values, key=q_values.get)
@@ -275,7 +276,7 @@ def main():
                 st.error("Missing required columns. Please re-run the simulation.")
             else:
                 try:
-                    with st.spinner("Optimizing..."):
+                    with st.spinner("Training models..."):
                         heavy_model, heavy_mae, heavy_r2, heavy_importance = train_model(df, "Intended_Heavy_On", params["model_type"], "heavy")
                         medium_model, medium_mae, medium_r2, medium_importance = train_model(df, "Intended_Medium_On", params["model_type"], "medium")
 
@@ -294,38 +295,40 @@ def main():
                             fig_importance.update_layout(title="Feature Importance for Machine Predictions", yaxis_title="Importance", barmode="group")
                             st.plotly_chart(fig_importance, use_container_width=True)
 
-                        optimizer = CarbonOptimizer(max_iterations=1000)
-                        optimizer.train(df)
-                        st.subheader("Q-Learning Convergence")
-                        fig_convergence = go.Figure()
-                        fig_convergence.add_trace(go.Scatter(y=optimizer.rewards, name="Reward (Negative CO2)", line=dict(color="blue")))
-                        fig_convergence.update_layout(title="Q-Learning Reward Over Iterations", yaxis_title="Reward")
-                        st.plotly_chart(fig_convergence, use_container_width=True)
+                        with st.spinner("Optimizing with Q-learning..."):
+                            optimizer = CarbonOptimizer(max_iterations=1000)
+                            optimizer.train(df)
+                            st.subheader("Q-Learning Convergence")
+                            fig_convergence = go.Figure()
+                            fig_convergence.add_trace(go.Scatter(y=optimizer.rewards, name="Reward (Negative CO2)", line=dict(color="blue")))
+                            fig_convergence.update_layout(title="Q-Learning Reward Over Iterations", yaxis_title="Reward")
+                            st.plotly_chart(fig_convergence, use_container_width=True)
 
-                        df["Predicted_Heavy_On"] = heavy_model.predict(df[["Shift", "Hour", "Day_of_Week"]]).round().clip(0, num_heavy)
-                        df["Predicted_Medium_On"] = medium_model.predict(df[["Shift", "Hour", "Day_of_Week"]]).round().clip(0, num_medium)
-                        df["Optimized_Heavy_On"] = df["Predicted_Heavy_On"].copy()
-                        df["Optimized_Medium_On"] = df["Predicted_Medium_On"].copy()
-                        df["Optimized_HVAC_Energy"] = df["HVAC_Energy"].copy()
+                            df["Predicted_Heavy_On"] = heavy_model.predict(df[["Shift", "Hour", "Day_of_Week"]]).round().clip(0, params["num_heavy"])
+                            df["Predicted_Medium_On"] = medium_model.predict(df[["Shift", "Hour", "Day_of_Week"]]).round().clip(0, params["num_medium"])
+                            df["Optimized_Heavy_On"] = df["Predicted_Heavy_On"].copy()
+                            df["Optimized_Medium_On"] = df["Predicted_Medium_On"].copy()
+                            df["Optimized_HVAC_Energy"] = df["HVAC_Energy"].copy()
 
-                        for i in range(len(df)):
-                            state = optimizer.get_state(df["Shift"].iloc[i], df["Hour"].iloc[i], df["Solar_Available"].iloc[i],
-                                                       df["Temperature"].iloc[i], df["Heavy_On"].iloc[i], df["Medium_On"].iloc[i])
-                            action = optimizer.get_action(state, epsilon=0)
-                            if action == "shift_heavy" and df["Solar_Available"].iloc[i] > 0:
-                                df.loc[i, "Optimized_Heavy_On"] = min(df["Heavy_On"].iloc[i], df["Predicted_Heavy_On"].iloc[i] + 1)
-                            elif action == "shift_medium" and df["Solar_Available"].iloc[i] > 0:
-                                df.loc[i, "Optimized_Medium_On"] = min(df["Medium_On"].iloc[i], df["Predicted_Medium_On"].iloc[i] + 1)
-                            elif action == "adjust_hvac" and df["HVAC_Inefficient"].iloc[i] == 1:
-                                df.loc[i, "Optimized_HVAC_Energy"] = 20 + 10 * np.maximum(df["Temperature"].iloc[i] - 22, 0)
+                            for i in range(len(df)):
+                                state = optimizer.get_state(df["Shift"].iloc[i], df["Hour"].iloc[i], df["Solar_Available"].iloc[i],
+                                                           df["Temperature"].iloc[i], df["Heavy_On"].iloc[i], df["Medium_On"].iloc[i])
+                                action = optimizer.get_action(state, epsilon=0)
+                                if action == "shift_heavy" and df["Solar_Available"].iloc[i] > 0:
+                                    df.loc[i, "Optimized_Heavy_On"] = min(df["Heavy_On"].iloc[i], df["Predicted_Heavy_On"].iloc[i] + 1)
+                                elif action == "shift_medium" and df["Solar_Available"].iloc[i] > 0:
+                                    df.loc[i, "Optimized_Medium_On"] = min(df["Medium_On"].iloc[i], df["Predicted_Medium_On"].iloc[i] + 1)
+                                elif action == "adjust_hvac" and df["HVAC_Inefficient"].iloc[i] == 1:
+                                    df.loc[i, "Optimized_HVAC_Energy"] = 20 + 10 * np.maximum(df["Temperature"].iloc[i] - 22, 0)
 
-                        df["Optimized_Energy_Heavy"] = df["Optimized_Heavy_On"] * params["energy_heavy"]
-                        df["Optimized_Energy_Medium"] = df["Optimized_Medium_On"] * params["energy_medium"]
-                        df["Optimized_Lighting_Energy"] = np.where(df["Is_Working_Hours"] | (df["Lighting_Energy"] == 10), df["Lighting_Energy"], 10)
-                        df["Optimized_Total_Energy"] = df[["Optimized_Energy_Heavy", "Optimized_Energy_Medium", "Optimized_HVAC_Energy", "Optimized_Lighting_Energy"]].sum(axis=1)
-                        df["Optimized_Grid_Energy"] = np.maximum(0, df["Optimized_Total_Energy"] - df["Solar_Used"])
-                        df["Optimized_CO2_Emissions"] = df["Optimized_Grid_Energy"] * GRID_EMISSION_FACTOR + df["Solar_Used"] * SOLAR_EMISSION_FACTOR
+                            df["Optimized_Energy_Heavy"] = df["Optimized_Heavy_On"] * params["energy_heavy"]
+                            df["Optimized_Energy_Medium"] = df["Optimized_Medium_On"] * params["energy_medium"]
+                            df["Optimized_Lighting_Energy"] = np.where(df["Is_Working_Hours"] | (df["Lighting_Energy"] == 10), df["Lighting_Energy"], 10)
+                            df["Optimized_Total_Energy"] = df[["Optimized_Energy_Heavy", "Optimized_Energy_Medium", "Optimized_HVAC_Energy", "Optimized_Lighting_Energy"]].sum(axis=1)
+                            df["Optimized_Grid_Energy"] = np.maximum(0, df["Optimized_Total_Energy"] - df["Solar_Used"])
+                            df["Optimized_CO2_Emissions"] = df["Optimized_Grid_Energy"] * GRID_EMISSION_FACTOR + df["Solar_Used"] * SOLAR_EMISSION_FACTOR
 
+                        st.subheader("Summary")
                         baseline_energy = df["Total_Energy"].sum()
                         optimized_energy = df["Optimized_Total_Energy"].sum()
                         energy_savings = baseline_energy - optimized_energy
@@ -336,7 +339,6 @@ def main():
                         co2_savings = baseline_co2 - optimized_co2
                         trees_equivalent = (co2_savings / 1000) * TREES_PER_TON_CO2
 
-                        st.subheader("Summary")
                         st.table({
                             "Metric": ["Baseline Energy (kWh)", "Optimized Energy (kWh)", "Energy Savings (kWh)", "Savings (%)",
                                        "Cost Savings ($)", "Baseline CO2 (kg)", "Optimized CO2 (kg)", "CO2 Savings (kg)",
@@ -373,6 +375,15 @@ def main():
                 except Exception as e:
                     st.error(f"Optimization error: {e}")
                     logger.error(f"Optimization error: {e}")
+                    # Display partial results if available
+                    if "Total_Energy" in df.columns and "CO2_Emissions" in df.columns:
+                        st.subheader("Partial Summary (Optimization Incomplete)")
+                        baseline_energy = df["Total_Energy"].sum()
+                        baseline_co2 = df["CO2_Emissions"].sum()
+                        st.table({
+                            "Metric": ["Baseline Energy (kWh)", "Baseline CO2 (kg)"],
+                            "Value": [f"{baseline_energy:.2f}", f"{baseline_co2:.2f}"]
+                        })
 
     with tab3:
         if "df" in st.session_state:
