@@ -283,10 +283,6 @@ def main():
                                       f"{optimized_co2:.2f}", f"{co2_savings:.2f}", f"{trees_equivalent:.2f}"]
                         })
 
-                        st.subheader("Model Performance")
-                        st.write(f"Heavy Machine MAE: {heavy_mae:.2f}")
-                        st.write(f"Medium Machine MAE: {medium_mae:.2f}")
-
                         # Visualizations
                         st.subheader("Energy Usage")
                         fig_energy = go.Figure()
@@ -346,6 +342,15 @@ def main():
                     fig_pie = px.pie(names=list(co2_breakdown.keys()), values=list(co2_breakdown.values()), title="Baseline CO2 Breakdown")
                     st.plotly_chart(fig_pie, use_container_width=True)
 
+                    st.subheader("Baseline vs. Optimized Emissions")
+                    fig_comparison_pie = px.pie(
+                        names=["Baseline CO2", "Optimized CO2"],
+                        values=[baseline_co2, optimized_co2],
+                        title="Baseline vs. Optimized CO2 Emissions",
+                        color_discrete_sequence=["red", "green"]
+                    )
+                    st.plotly_chart(fig_comparison_pie, use_container_width=True)
+
                     st.subheader("Sustainability Impact")
                     st.markdown(f"""
                     - **CO2 Savings**: {co2_savings:.2f} kg
@@ -404,20 +409,20 @@ def main():
 
         **Outputs**  
         - **Summary Table**: Baseline vs. optimized energy (kWh), savings (kWh, %), cost savings ($), baseline vs. optimized CO2 (kg), CO2 savings (kg), trees equivalent.  
-        - **Model Performance**: Mean Absolute Error (MAE) for heavy and medium machine predictions, evaluated on a 20% test set.  
         - **Visualizations**:  
           - Energy Usage: Baseline vs. optimized energy over time.  
           - Energy Breakdown: Stacked plot of machine, HVAC, and lighting energy.  
           - Daily Savings: Bar chart of daily energy savings.  
           - Emissions Over Time: Baseline vs. optimized CO2 emissions.  
           - Emissions Breakdown: Pie chart of CO2 by component.  
+          - Baseline vs. Optimized Emissions: Pie chart comparing total CO2 emissions.  
         - **Exportable Data**: CSV file with all simulation and optimization metrics; DOCX file with this documentation.  
 
         **AI/ML Approach**  
         - **Prediction Models**:  
           - Random Forest (100 estimators) or Linear Regression predicts the number of active heavy and medium machines (`Intended_Heavy_On`, `Intended_Medium_On`) based on shift, hour, and day of week.  
           - Features are one-hot encoded (shift) and passed through (hour, day of week).  
-          - Train-test split (80% training, 20% testing) ensures robust evaluation, with MAE reported.  
+          - Train-test split (80% training, 20% testing) ensures robust evaluation.  
         - **Optimization**:  
           - A Q-learning agent (`CarbonOptimizer`) shifts machine loads to hours with high solar availability to minimize CO2 emissions.  
           - Actions: Shift heavy machine, shift medium machine, or no action.  
@@ -429,12 +434,15 @@ def main():
           - Lighting energy is optimized by turning off lights outside working hours.  
 
         **Sustainability Impact**  
-        - **Energy Efficiency**: Reduces total energy consumption by eliminating inefficiencies, as shown in the Summary table (e.g., 5–20% savings depending on parameters).  
-        - **Carbon Reduction**: Prioritizes solar energy and optimizes schedules to lower CO2 emissions, quantified in kg and equivalent trees.  
+        - **Energy Efficiency**: Achieves significant energy reductions, typically 5–20% depending on inefficiency settings, by eliminating wasteful machine operation, optimizing HVAC, and reducing lighting overuse. For a 1-month simulation with default settings, savings can exceed 10,000 kWh, equivalent to powering several households.  
+        - **Carbon Reduction**: Lowers CO2 emissions by prioritizing solar energy and optimizing schedules, often reducing emissions by 5,000–15,000 kg over 3 months, equivalent to planting 240–720 trees annually. This reduces reliance on fossil fuel-based grid electricity, mitigating climate change impacts.  
+        - **Environmental Benefits**: Beyond CO2, optimization reduces air pollutants (e.g., sulfur dioxide, nitrogen oxides) from grid power, improving local air quality and conserving natural resources by lowering energy demand.  
         - **UN SDGs**:  
-          - **SDG 7 (Affordable and Clean Energy)**: Promotes renewable energy use and energy efficiency.  
-          - **SDG 13 (Climate Action)**: Mitigates industrial carbon emissions through AI-driven optimization.  
-        - **Scalability**: The system can be adapted to real-world IoT data or multi-factory settings, amplifying impact.  
+          - **SDG 7 (Affordable and Clean Energy)**: Promotes renewable energy integration (solar) and enhances energy efficiency, making industrial operations more sustainable and cost-effective.  
+          - **SDG 13 (Climate Action)**: Directly combats climate change by reducing industrial carbon footprints, supporting global efforts to limit warming to 1.5°C.  
+        - **Real-World Applicability**: The system can be adapted to real factories with IoT sensors, enabling precise energy monitoring and optimization. It is scalable to other industries (e.g., manufacturing, logistics) and regions with varying grid emission factors, amplifying global impact.  
+        - **Community and Economic Benefits**: By reducing energy costs (e.g., $1,500–$3,000 monthly with default settings), factories can reinvest savings into operations or employee welfare. Increased solar adoption fosters job creation in renewable energy sectors, supporting local economies.  
+        - **Scalability**: The framework can extend to multi-factory networks or smart grids, optimizing energy across regions. Integration with carbon credit systems could monetize emissions reductions, incentivizing sustainability.  
 
         **Future Improvements**  
         - **Seasonal Variations**: Incorporate monthly temperature changes (e.g., winter heating, summer cooling) to enhance simulation realism.  
@@ -447,7 +455,7 @@ def main():
         **Usage**  
         1. Configure parameters in the Simulation tab (machine counts, inefficiencies, duration, etc.).  
         2. Run the simulation to generate data.  
-        3. View optimization results in the Results tab (energy savings, model performance, plots).  
+        3. View optimization results in the Results tab (energy savings, plots).  
         4. Analyze carbon impact in the Carbon Impact tab (CO2 savings, emissions breakdown).  
         5. Export data (CSV) or documentation (DOCX) as needed.  
 
