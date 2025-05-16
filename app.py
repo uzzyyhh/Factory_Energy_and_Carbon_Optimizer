@@ -3,9 +3,6 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
-from sklearn.preprocessing import OneHotEncoder
-from sklearn.compose import ColumnTransformer
-from sklearn.pipeline import Pipeline
 from datetime import datetime
 import logging
 
@@ -91,10 +88,24 @@ def main():
             if all(col in df.columns for col in ["Shift", "Hour", "Solar_Available", "CO2_Emissions", "Intended_Heavy_On", "Intended_Medium_On", "Day_of_Week", "Heavy_On", "Medium_On", "Energy_Heavy", "Energy_Medium", "HVAC_Energy", "Lighting_Energy", "Temperature", "HVAC_Inefficient", "Is_Working_Hours", "Solar_Used", "Grid_Energy"]):
                 with st.spinner("Optimizing..."):
                     optimizer = CarbonOptimizer()
-                    for i in range(min(100, len(df)-1)): state, action, reward, next_state = [optimizer.get_state(*df.iloc[i][["Shift", "Hour", "Solar_Available"]]), optimizer.get_action(state), -df["CO2_Emissions"].iloc[i], optimizer.get_state(*df.iloc[i+1][["Shift", "Hour", "Solar_Available"]])]; optimizer.update(state, action, reward, next_state)
+                    for i in range(min(100, len(df)-1)): 
+                        state = optimizer.get_state(*df.iloc[i][["Shift", "Hour", "Solar_Available"]])
+                        action = optimizer.get_action(state)
+                        reward = -df["CO2_Emissions"].iloc[i]
+                        next_state = optimizer.get_state(*df.iloc[i+1][["Shift", "Hour", "Solar_Available"]])
+                        optimizer.update(state, action, reward, next_state)
+                    
                     df["Optimized_Heavy_On"] = df["Intended_Heavy_On"].clip(0, params["num_heavy"])
                     df["Optimized_Medium_On"] = df["Intended_Medium_On"].clip(0, params["num_medium"])
-                    for i in range(len(df)): state = optimizer.get_state(*df.iloc[i][["Shift", "Hour", "Solar_Available"]]); action = optimizer.get_action(state, 0); if action == "shift_heavy" and df["Solar_Available"].iloc[i] > 0: df.loc[i, "Optimized_Heavy_On"] = min(df["Heavy_On"].iloc[i], df["Optimized_Heavy_On"].iloc[i] + 1); elif action == "shift_medium" and df["Solar_Available"].iloc[i] > 0: df.loc[i, "Optimized_Medium_On"] = min(df["Medium_On"].iloc[i], df["Optimized_Medium_On"].iloc[i] + 1)
+                    
+                    for i in range(len(df)):
+                        state = optimizer.get_state(*df.iloc[i][["Shift", "Hour", "Solar_Available"]])
+                        action = optimizer.get_action(state, 0)
+                        if action == "shift_heavy" and df["Solar_Available"].iloc[i] > 0:
+                            df.loc[i, "Optimized_Heavy_On"] = min(df["Heavy_On"].iloc[i], df["Optimized_Heavy_On"].iloc[i] + 1)
+                        elif action == "shift_medium" and df["Solar_Available"].iloc[i] > 0:
+                            df.loc[i, "Optimized_Medium_On"] = min(df["Medium_On"].iloc[i], df["Optimized_Medium_On"].iloc[i] + 1)
+                    
                     df["Optimized_Energy_Heavy"], df["Optimized_Energy_Medium"] = df["Optimized_Heavy_On"] * params["energy_heavy"], df["Optimized_Medium_On"] * params["energy_medium"]
                     df["Optimized_HVAC_Energy"] = np.where(df["HVAC_Inefficient"] == 0, df["HVAC_Energy"], 20 + 10 * np.maximum(df["Temperature"] - 22, 0))
                     df["Optimized_Lighting_Energy"] = np.where(df["Is_Working_Hours"] | (df["Lighting_Energy"] == 10), df["Lighting_Energy"], 10)
