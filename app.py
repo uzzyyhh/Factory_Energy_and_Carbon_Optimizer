@@ -283,10 +283,6 @@ def main():
                                       f"{optimized_co2:.2f}", f"{co2_savings:.2f}", f"{trees_equivalent:.2f}"]
                         })
 
-                        st.subheader("Model Performance")
-                        st.write(f"Heavy Machine MAE: {heavy_mae:.2f}")
-                        st.write(f"Medium Machine MAE: {medium_mae:.2f}")
-
                         # Visualizations
                         st.subheader("Energy Usage")
                         fig_energy = go.Figure()
