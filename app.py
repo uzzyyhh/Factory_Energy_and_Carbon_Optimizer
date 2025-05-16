@@ -25,8 +25,11 @@ TREES_PER_TON_CO2 = 48  # Trees per ton of CO2 absorbed
 def simulate_factory_data(num_heavy, energy_heavy, num_medium, energy_medium, p_ineff, q_ineff, r_ineff, hours=720):
     """Simulate factory energy consumption with inefficiencies and solar data."""
     try:
+        logger.info("Starting simulation with hours=%d, num_heavy=%d, num_medium=%d", hours, num_heavy, num_medium)
         timestamps = pd.date_range(start="2025-06-01 00:00", periods=hours, freq="H")
         df = pd.DataFrame({"Timestamp": timestamps})
+        logger.info("Timestamps created, length=%d", len(df))
+
         df["Day_of_Week"] = df["Timestamp"].dt.dayofweek
         df["Hour"] = df["Timestamp"].dt.hour
         df["Is_Weekday"] = df["Day_of_Week"] < 5
@@ -39,36 +42,43 @@ def simulate_factory_data(num_heavy, energy_heavy, num_medium, energy_medium, p_
         ]
         choices = ["weekend", "day", "night"]
         df["Shift"] = np.select(conditions, choices, default="overnight")
+        logger.info("Shift column created")
 
         # Machine schedules
         shift_map_heavy = {"day": num_heavy, "night": num_heavy // 2, "overnight": 0, "weekend": 0}
         shift_map_medium = {"day": num_medium, "night": num_medium, "overnight": num_medium // 5, "weekend": num_medium // 5}
         df["Intended_Heavy_On"] = df["Shift"].map(shift_map_heavy)
         df["Intended_Medium_On"] = df["Shift"].map(shift_map_medium)
+        logger.info("Machine schedules set")
 
         # Inefficiencies
         df["Heavy_On"] = df["Intended_Heavy_On"] + np.random.binomial(num_heavy - df["Intended_Heavy_On"], p_ineff)
         df["Medium_On"] = df["Intended_Medium_On"] + np.random.binomial(num_medium - df["Intended_Medium_On"], p_ineff)
         df["Energy_Heavy"] = df["Heavy_On"] * energy_heavy
         df["Energy_Medium"] = df["Medium_On"] * energy_medium
+        logger.info("Inefficiencies applied")
 
         # HVAC and temperature
         df["Temperature"] = 30 + 5 * np.sin(2 * np.pi * (df["Hour"] - 14) / 24) + np.random.normal(0, 1, len(df))
         df["HVAC_Inefficient"] = np.random.choice([0, 1], size=len(df), p=[1 - q_ineff, q_ineff])
         df["HVAC_Energy"] = 20 + 10 * np.maximum(df["Temperature"] - (22 - 2 * df["HVAC_Inefficient"]), 0)
+        logger.info("HVAC data computed")
 
         # Lighting
         df["Is_Working_Hours"] = df["Is_Weekday"] & (df["Hour"] >= 8) & (df["Hour"] < 18)
         df["Lighting_Energy"] = np.where(df["Is_Working_Hours"], 50, np.where(np.random.random(len(df)) < r_ineff, 50, 10))
+        logger.info("Lighting data computed")
 
         # Solar energy
         df["Solar_Available"] = np.where((df["Hour"] >= 6) & (df["Hour"] <= 18), 100 * np.sin(np.pi * (df["Hour"] - 6) / 12), 0)
         df["Solar_Used"] = np.minimum(df["Solar_Available"], df["Energy_Heavy"] + df["Energy_Medium"] + df["HVAC_Energy"] + df["Lighting_Energy"])
         df["Grid_Energy"] = np.maximum(0, df["Energy_Heavy"] + df["Energy_Medium"] + df["HVAC_Energy"] + df["Lighting_Energy"] - df["Solar_Used"])
+        logger.info("Solar and grid energy computed")
 
         # Totals and emissions
         df["Total_Energy"] = df[["Energy_Heavy", "Energy_Medium", "HVAC_Energy", "Lighting_Energy"]].sum(axis=1)
         df["CO2_Emissions"] = df["Grid_Energy"] * GRID_EMISSION_FACTOR + df["Solar_Used"] * SOLAR_EMISSION_FACTOR
+        logger.info("Total energy and CO2 emissions computed")
 
         # Efficient baseline
         df["Efficient_Heavy_On"] = df["Intended_Heavy_On"]
@@ -79,12 +89,13 @@ def simulate_factory_data(num_heavy, energy_heavy, num_medium, energy_medium, p_
         df["Efficient_Lighting_Energy"] = np.where(df["Is_Working_Hours"], 50, 10)
         df["Efficient_Total_Energy"] = df[["Efficient_Energy_Heavy", "Efficient_Energy_Medium", "Efficient_HVAC_Energy", "Efficient_Lighting_Energy"]].sum(axis=1)
         df["Efficient_CO2_Emissions"] = df["Efficient_Total_Energy"] * GRID_EMISSION_FACTOR
+        logger.info("Efficient baseline computed")
 
-        logger.info("Simulation completed with columns: %s", df.columns.tolist())
+        logger.info("Simulation completed successfully with columns: %s", df.columns.tolist())
         return df
     except Exception as e:
-        logger.error("Simulation failed: %s", e)
-        st.error(f"Simulation failed: {e}")
+        logger.error("Simulation failed: %s", str(e))
+        st.error(f"Simulation failed: {str(e)}")
         return None
 
 class CarbonOptimizer:
@@ -115,7 +126,13 @@ class CarbonOptimizer:
 
 @st.cache_data
 def get_simulated_data(_num_heavy, _energy_heavy, _num_medium, _energy_medium, _p_ineff, _q_ineff, _r_ineff, _hours):
-    return simulate_factory_data(_num_heavy, _energy_heavy, _num_medium, _energy_medium, _p_ineff, _q_ineff, _r_ineff, _hours)
+    logger.info("Calling get_simulated_data with hours=%d", _hours)
+    result = simulate_factory_data(_num_heavy, _energy_heavy, _num_medium, _energy_medium, _p_ineff, _q_ineff, _r_ineff, _hours)
+    if result is not None:
+        logger.info("get_simulated_data completed successfully")
+    else:
+        logger.error("get_simulated_data returned None")
+    return result
 
 @st.cache_resource
 def train_model(df, target, model_type, cache_key):
@@ -134,10 +151,11 @@ def train_model(df, target, model_type, cache_key):
         y_pred = pipeline.predict(X)
         mae = mean_absolute_error(y, y_pred)
         joblib.dump(pipeline, f"model_{target}_{model_type.replace(' ', '_')}.joblib")
+        logger.info("Model trained for target=%s, MAE=%.2f", target, mae)
         return pipeline, mae
     except Exception as e:
-        logger.error("Model training failed: %s", e)
-        st.error(f"Model training failed: {e}")
+        logger.error("Model training failed: %s", str(e))
+        st.error(f"Model training failed: {str(e)}")
         return None, None
 
 def main():
@@ -171,14 +189,55 @@ def main():
         model_type = st.selectbox("Prediction Model", ["Random Forest", "Linear Regression"])
 
         if st.button("Run Simulation"):
+            logger.info("Run Simulation button clicked")
             with st.spinner("Simulating..."):
                 df = get_simulated_data(num_heavy, energy_heavy, num_medium, energy_medium, p_ineff, q_ineff, r_ineff, hours)
                 if df is not None:
                     st.session_state["df"] = df
-                    st.session_state["params"] = {"num_heavy": num_heavy, "energy_heavy": energy_heavy, "num_medium": num_medium,
-                                                "energy_medium": energy_medium, "cost_per_kwh": cost_per_kwh, "model_type": model_type}
-                    st.success("Simulation completed!")
-                    st.rerun()
+                    st.session_state["params"] = {
+                        "num_heavy": num_heavy,
+                        "energy_heavy": energy_heavy,
+                        "num_medium": num_medium,
+                        "energy_medium": energy_medium,
+                        "cost_per_kwh": cost_per_kwh,
+                        "model_type": model_type
+                    }
+                    logger.info("Simulation successful, DataFrame shape=%s", str(df.shape))
+                    st.session_state["show_success"] = True  # Set flag to show the message
+                    st.session_state["switch_to_results"] = True  # Set flag to switch to Results tab
+                else:
+                    logger.error("Simulation returned None")
+                    st.error("Simulation failed. Check logs for details.")
+
+        # Check for the success flag and display the message
+        if "show_success" in st.session_state and st.session_state["show_success"]:
+            st.success("Simulation completed!")
+            # Reset the flag and trigger re-run after the message is displayed
+            st.session_state["show_success"] = False
+            st.rerun()
+
+        # JavaScript to switch to the Results tab after re-run
+        if "switch_to_results" in st.session_state and st.session_state["switch_to_results"]:
+            # Streamlit tabs are rendered as buttons with role="tab" and aria-label matching the tab name
+            # "Results" is the second tab (index 1)
+            js_code = """
+            <script>
+                // Wait for the DOM to load
+                document.addEventListener('DOMContentLoaded', function() {
+                    // Find the "Results" tab button (second tab, index 1)
+                    const tabs = document.querySelectorAll('button[role="tab"]');
+                    if (tabs.length > 1) {
+                        const resultsTab = tabs[1];  // "Results" tab
+                        if (resultsTab) {
+                            resultsTab.click();  // Simulate click to switch to Results tab
+                        }
+                    }
+                });
+            </script>
+            """
+            st.components.v1.html(js_code, height=0)
+            # Reset the flag after switching
+            st.session_state["switch_to_results"] = False
 
     with tab2:
         if "df" in st.session_state and "params" in st.session_state:
@@ -190,6 +249,7 @@ def main():
                            "Lighting_Energy", "Temperature", "HVAC_Inefficient", "Is_Working_Hours", "Solar_Used", "Grid_Energy"]
             if not all(col in df.columns for col in required_cols):
                 st.error("Missing required columns. Please re-run the simulation.")
+                logger.error("Missing columns in Tab 2: %s", [col for col in required_cols if col not in df.columns])
             else:
                 try:
                     with st.spinner("Optimizing..."):
@@ -282,8 +342,8 @@ def main():
                         csv = df.to_csv(index=False)
                         st.download_button("Download Data as CSV", csv, f"factory_energy_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv", "text/csv")
                 except Exception as e:
-                    st.error(f"Optimization error: {e}")
-                    logger.error(f"Optimization error: {e}")
+                    st.error(f"Optimization error: {str(e)}")
+                    logger.error("Optimization error: %s", str(e))
 
     with tab3:
         if "df" in st.session_state:
@@ -291,6 +351,7 @@ def main():
             st.header("Carbon Impact")
             if "CO2_Emissions" not in df.columns or "Optimized_CO2_Emissions" not in df.columns:
                 st.error("Carbon data missing. Please re-run the simulation.")
+                logger.error("Missing carbon data in Tab 3")
             else:
                 try:
                     baseline_co2 = df["CO2_Emissions"].sum()
@@ -322,8 +383,8 @@ def main():
                     - **Goal**: Supports UN SDG 7 & 13 by reducing industrial emissions.
                     """)
                 except Exception as e:
-                    st.error(f"Carbon impact error: {e}")
-                    logger.error(f"Carbon impact error: {e}")
+                    st.error(f"Carbon impact error: {str(e)}")
+                    logger.error("Carbon impact error: %s", str(e))
 
     with tab4:
         st.header("Documentation")
