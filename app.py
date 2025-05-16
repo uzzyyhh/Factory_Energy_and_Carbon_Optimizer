@@ -283,6 +283,10 @@ def main():
                                       f"{optimized_co2:.2f}", f"{co2_savings:.2f}", f"{trees_equivalent:.2f}"]
                         })
 
+                        st.subheader("Model Performance")
+                        st.write(f"Heavy Machine MAE: {heavy_mae:.2f}")
+                        st.write(f"Medium Machine MAE: {medium_mae:.2f}")
+
                         # Visualizations
                         st.subheader("Energy Usage")
                         fig_energy = go.Figure()
@@ -356,32 +360,98 @@ def main():
         st.header("Documentation")
         documentation_text = """
         ### Factory Energy & Carbon Optimizer
-        Optimizes energy use and carbon emissions for a factory using ML and solar integration.
 
-        **Features**:
-        - Simulates energy consumption with inefficiencies and solar availability.
-        - Optimizes using Random Forest/Linear Regression and Q-learning for carbon reduction.
-        - Visualizes energy usage, savings, and CO2 emissions.
-        - Exports data as CSV with cost and carbon metrics.
+        **Overview**  
+        The Factory Energy & Carbon Optimizer is an AI-driven tool designed to simulate and optimize energy consumption and carbon emissions in a factory environment. By generating realistic synthetic data and applying machine learning and reinforcement learning, the system identifies inefficiencies (e.g., idle machines, overheating HVAC) and recommends actions to reduce energy waste and CO2 emissions. The tool supports sustainable industrial operations, aligning with UN Sustainable Development Goals (SDGs) 7 (Affordable and Clean Energy) and 13 (Climate Action). Built as a Streamlit web application, it provides an interactive interface for configuring simulations, viewing results, and exporting data.
 
-        **Inputs**:
-        - Machine counts and energy consumption.
-        - Inefficiency probabilities for machines, HVAC, and lighting.
-        - Simulation duration and cost per kWh.
+        **Simulation Assumptions**  
+        The system simulates a factory’s energy consumption with the following justified assumptions, based on typical industrial settings:  
+        - **Time Period**: Starts June 1, 2025, with user-selectable durations (1 week: 168 hours, 1 month: 720 hours, 3 months: 2160 hours).  
+        - **Shifts and Occupancy**:  
+          - **Day Shift**: Weekdays, 8 AM–4 PM, full operation of heavy machines, medium machines, and lighting.  
+          - **Night Shift**: Weekdays, 4 PM–12 AM, 50% heavy machines, full medium machines, reduced lighting.  
+          - **Overnight Shift**: Weekdays, 12 AM–8 AM, no heavy machines, 20% medium machines, minimal lighting.  
+          - **Weekend**: No heavy machines, 20% medium machines, minimal lighting.  
+        - **Emission Factors**:  
+          - Grid electricity: 0.5 kg CO2/kWh (typical for fossil fuel-based grids).  
+          - Solar electricity: 0.05 kg CO2/kWh (accounts for manufacturing and installation emissions).  
+        - **Equipment Profiles**:  
+          - **Heavy Machines**: Default 5 machines, each consuming 20 kW when active, with user-defined counts and energy.  
+          - **Medium Machines**: Default 10 machines, each consuming 10 kW, with user-defined counts and energy.  
+          - **HVAC System**: Base consumption of 20 kW, increases by 10 kW per °C above 22°C (20°C if inefficient).  
+          - **Lighting**: 50 kW during working hours (weekdays, 8 AM–6 PM), 10 kW otherwise.  
+        - **Inefficiencies**:  
+          - Machine inefficiency probability (default 0.1): Machines may run unnecessarily outside intended schedules.  
+          - HVAC inefficiency probability (default 0.2): Lowers temperature threshold to 20°C, increasing cooling demand.  
+          - Lighting inefficiency probability (default 0.1): Lights may remain on at 50 kW outside working hours.  
+        - **Temperature**: Varies daily between 25–35°C with a sinusoidal pattern (peaks at 2 PM) and ±1°C random noise, simulating summer conditions.  
+        - **Solar Availability**: Peaks at 100 kW from 6 AM–6 PM, following a sinusoidal curve, zero at night.  
+        - **Carbon Offset**: 48 trees absorb 1 ton of CO2 annually, used to calculate equivalent tree planting for CO2 savings.  
 
-        **Outputs**:
-        - Summary table with energy, cost, and CO2 savings.
-        - Interactive plots for energy and carbon trends.
-        - Downloadable CSV data.
+        **Features**  
+        - **Realistic Simulation**: Generates hourly energy consumption data for heavy/medium machines, HVAC, and lighting, incorporating inefficiencies and solar availability.  
+        - **AI-Driven Optimization**: Uses Random Forest or Linear Regression to predict efficient machine schedules and Q-learning to shift loads to solar-heavy hours.  
+        - **Visualization**: Provides interactive plots for energy usage, breakdown, daily savings, CO2 emissions, and emissions breakdown.  
+        - **Export Options**: Downloads simulation data as CSV and documentation as DOCX.  
+        - **User Configurability**: Allows customization of machine counts, energy consumption, inefficiency probabilities, simulation duration, and model type.  
 
-        **Sustainability**:
-        - Reduces CO2 emissions with solar use and optimization.
-        - Scalable to real-world IoT or multi-factory systems.
+        **Inputs**  
+        - **Machine Configuration**: Number of heavy/medium machines (min: 1, default: 5/10) and energy per machine (min: 0.1 kW, default: 20/10 kW).  
+        - **Inefficiency Probabilities**: Machine (0–1, default: 0.1), HVAC (0–1, default: 0.2), lighting (0–1, default: 0.1).  
+        - **Simulation Duration**: 1 week (168h), 1 month (720h), or 3 months (2160h).  
+        - **Cost per kWh**: Default $0.15, for calculating cost savings.  
+        - **Model Type**: Random Forest (100 estimators) or Linear Regression.  
 
-        **Future**:
-        - Real-time grid carbon data integration.
-        - IoT connectivity.
-        - Blockchain for carbon credits.
+        **Outputs**  
+        - **Summary Table**: Baseline vs. optimized energy (kWh), savings (kWh, %), cost savings ($), baseline vs. optimized CO2 (kg), CO2 savings (kg), trees equivalent.  
+        - **Model Performance**: Mean Absolute Error (MAE) for heavy and medium machine predictions, evaluated on a 20% test set.  
+        - **Visualizations**:  
+          - Energy Usage: Baseline vs. optimized energy over time.  
+          - Energy Breakdown: Stacked plot of machine, HVAC, and lighting energy.  
+          - Daily Savings: Bar chart of daily energy savings.  
+          - Emissions Over Time: Baseline vs. optimized CO2 emissions.  
+          - Emissions Breakdown: Pie chart of CO2 by component.  
+        - **Exportable Data**: CSV file with all simulation and optimization metrics; DOCX file with this documentation.  
+
+        **AI/ML Approach**  
+        - **Prediction Models**:  
+          - Random Forest (100 estimators) or Linear Regression predicts the number of active heavy and medium machines (`Intended_Heavy_On`, `Intended_Medium_On`) based on shift, hour, and day of week.  
+          - Features are one-hot encoded (shift) and passed through (hour, day of week).  
+          - Train-test split (80% training, 20% testing) ensures robust evaluation, with MAE reported.  
+        - **Optimization**:  
+          - A Q-learning agent (`CarbonOptimizer`) shifts machine loads to hours with high solar availability to minimize CO2 emissions.  
+          - Actions: Shift heavy machine, shift medium machine, or no action.  
+          - State: Shift type, hour, solar availability (binary).  
+          - Reward: Negative CO2 emissions, encouraging low-carbon schedules.  
+          - Parameters: Learning rate (0.1), discount factor (0.9), exploration rate (0.1).  
+        - **Additional Optimizations**:  
+          - HVAC energy is reduced by resetting inefficient units to a 22°C threshold.  
+          - Lighting energy is optimized by turning off lights outside working hours.  
+
+        **Sustainability Impact**  
+        - **Energy Efficiency**: Reduces total energy consumption by eliminating inefficiencies, as shown in the Summary table (e.g., 5–20% savings depending on parameters).  
+        - **Carbon Reduction**: Prioritizes solar energy and optimizes schedules to lower CO2 emissions, quantified in kg and equivalent trees.  
+        - **UN SDGs**:  
+          - **SDG 7 (Affordable and Clean Energy)**: Promotes renewable energy use and energy efficiency.  
+          - **SDG 13 (Climate Action)**: Mitigates industrial carbon emissions through AI-driven optimization.  
+        - **Scalability**: The system can be adapted to real-world IoT data or multi-factory settings, amplifying impact.  
+
+        **Future Improvements**  
+        - **Seasonal Variations**: Incorporate monthly temperature changes (e.g., winter heating, summer cooling) to enhance simulation realism.  
+        - **Real-Time Data**: Integrate IoT sensors for live energy and weather data, replacing synthetic data.  
+        - **Advanced Models**: Use deep reinforcement learning or neural networks for more complex optimization.  
+        - **Grid Carbon Data**: Incorporate real-time grid emission factors to dynamically adjust schedules.  
+        - **Carbon Credits**: Implement blockchain-based carbon credit tracking for monetizing emissions reductions.  
+        - **Multi-Site Optimization**: Extend the system to optimize energy across multiple factories or buildings.  
+
+        **Usage**  
+        1. Configure parameters in the Simulation tab (machine counts, inefficiencies, duration, etc.).  
+        2. Run the simulation to generate data.  
+        3. View optimization results in the Results tab (energy savings, model performance, plots).  
+        4. Analyze carbon impact in the Carbon Impact tab (CO2 savings, emissions breakdown).  
+        5. Export data (CSV) or documentation (DOCX) as needed.  
+
+        This tool demonstrates the power of AI in achieving sustainable industrial operations, offering actionable insights for energy and carbon reduction.
         """
         st.markdown(documentation_text)
 
