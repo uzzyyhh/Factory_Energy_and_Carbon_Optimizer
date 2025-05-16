@@ -8,7 +8,7 @@ from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import OneHotEncoder
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
-from sklearn.metrics import mean_absolute_error
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import train_test_split
 import joblib
 import logging
@@ -139,8 +139,10 @@ def train_model(df, target, model_type, cache_key):
         pipeline.fit(X_train, y_train)
         y_pred = pipeline.predict(X_test)
         mae = mean_absolute_error(y_test, y_pred)
+        mse = mean_squared_error(y_test, y_pred)
+        r2 = r2_score(y_test, y_pred)
         joblib.dump(pipeline, f"model_{target}_{model_type.replace(' ', '_')}.joblib")
-        return pipeline, mae
+        return pipeline, {"MAE": mae, "MSE": mse, "R2": r2}
     except Exception as e:
         logger.error("Model training failed: %s", e)
         st.error(f"Model training failed: {e}")
@@ -224,10 +226,23 @@ def main():
             else:
                 try:
                     with st.spinner("Optimizing..."):
-                        heavy_model, heavy_mae = train_model(df, "Intended_Heavy_On", params["model_type"], "heavy")
-                        medium_model, medium_mae = train_model(df, "Intended_Medium_On", params["model_type"], "medium")
+                        heavy_model, heavy_metrics = train_model(df, "Intended_Heavy_On", params["model_type"], "heavy")
+                        medium_model, medium_metrics = train_model(df, "Intended_Medium_On", params["model_type"], "medium")
 
                     if heavy_model and medium_model:
+                        # Display model accuracy metrics
+                        st.subheader("Model Accuracy")
+                        st.markdown("**Heavy Machines Model**")
+                        st.table({
+                            "Metric": ["Mean Absolute Error (MAE)", "Mean Squared Error (MSE)", "R-squared (R²)"],
+                            "Value": [f"{heavy_metrics['MAE']:.4f}", f"{heavy_metrics['MSE']:.4f}", f"{heavy_metrics['R2']:.4f}"]
+                        })
+                        st.markdown("**Medium Machines Model**")
+                        st.table({
+                            "Metric": ["Mean Absolute Error (MAE)", "Mean Squared Error (MSE)", "R-squared (R²)"],
+                            "Value": [f"{medium_metrics['MAE']:.4f}", f"{medium_metrics['MSE']:.4f}", f"{medium_metrics['R2']:.4f}"]
+                        })
+
                         # Carbon optimization
                         optimizer = CarbonOptimizer()
                         for i in range(min(100, len(df) - 1)):  # Limit iterations for efficiency
@@ -426,6 +441,7 @@ def main():
 
         **Outputs**  
         - **Summary Table**: Baseline vs. optimized energy (kWh), savings (kWh, %), cost savings ($), baseline vs. optimized CO2 (kg), CO2 savings (kg), trees equivalent.  
+        - **Model Accuracy Metrics**: Mean Absolute Error (MAE), Mean Squared Error (MSE), and R-squared (R²) for heavy and medium machine prediction models.  
         - **Visualizations**:  
           - Energy Usage: Baseline vs. optimized energy over time.  
           - Energy Breakdown: Stacked plot of machine, HVAC, and lighting energy.  
@@ -440,6 +456,7 @@ def main():
           - Random Forest (100 estimators) or Linear Regression predicts the number of active heavy and medium machines (`Intended_Heavy_On`, `Intended_Medium_On`) based on shift, hour, and day of week.  
           - Features are one-hot encoded (shift) and passed through (hour, day of week).  
           - Train-test split (80% training, 20% testing) ensures robust evaluation.  
+          - Metrics: MAE, MSE, and R² are calculated to assess model performance.  
         - **Optimization**:  
           - A Q-learning agent (`CarbonOptimizer`) shifts machine loads to hours with high solar availability to minimize CO2 emissions.  
           - Actions: Shift heavy machine, shift medium machine, or no action.  
@@ -472,7 +489,7 @@ def main():
         **Usage**  
         1. Configure parameters in the Simulation tab (machine counts, inefficiencies, duration, etc.).  
         2. Run the simulation to generate data.  
-        3. View optimization results in the Results tab (energy savings, plots).  
+        3. View optimization results in the Results tab (energy savings, model accuracy, plots).  
         4. Analyze carbon impact in the Carbon Impact tab (CO2 savings, emissions breakdown).  
         5. Export data (CSV) or documentation (DOCX) as needed.  
 
