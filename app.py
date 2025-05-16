@@ -13,6 +13,8 @@ from sklearn.model_selection import train_test_split
 import joblib
 import logging
 from datetime import datetime
+from docx import Document
+from io import BytesIO
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, filename='app.log')
@@ -144,6 +146,31 @@ def train_model(df, target, model_type, cache_key):
         st.error(f"Model training failed: {e}")
         return None, None
 
+def create_docx_from_markdown(markdown_text):
+    """Convert markdown text to a .docx file."""
+    try:
+        doc = Document()
+        lines = markdown_text.split('\n')
+        for line in lines:
+            if line.startswith('# '):
+                doc.add_heading(line[2:], level=1)
+            elif line.startswith('## '):
+                doc.add_heading(line[3:], level=2)
+            elif line.startswith('### '):
+                doc.add_heading(line[4:], level=3)
+            elif line.startswith('- '):
+                doc.add_paragraph(line[2:], style='ListBullet')
+            else:
+                doc.add_paragraph(line)
+        output = BytesIO()
+        doc.save(output)
+        output.seek(0)
+        return output
+    except Exception as e:
+        logger.error("Failed to create .docx: %s", e)
+        st.error(f"Failed to create .docx: {e}")
+        return None
+
 def main():
     st.set_page_config(page_title="Factory Energy & Carbon Optimizer", layout="wide")
     st.title("Factory Energy & Carbon Optimizer")
@@ -256,6 +283,10 @@ def main():
                                       f"{optimized_co2:.2f}", f"{co2_savings:.2f}", f"{trees_equivalent:.2f}"]
                         })
 
+                        st.subheader("Model Performance")
+                        st.write(f"Heavy Machine MAE: {heavy_mae:.2f}")
+                        st.write(f"Medium Machine MAE: {medium_mae:.2f}")
+
                         # Visualizations
                         st.subheader("Energy Usage")
                         fig_energy = go.Figure()
@@ -327,7 +358,7 @@ def main():
 
     with tab4:
         st.header("Documentation")
-        st.markdown("""
+        documentation_text = """
         ### Factory Energy & Carbon Optimizer
         Optimizes energy use and carbon emissions for a factory using ML and solar integration.
 
@@ -355,7 +386,19 @@ def main():
         - Real-time grid carbon data integration.
         - IoT connectivity.
         - Blockchain for carbon credits.
-        """)
+        """
+        st.markdown(documentation_text)
+
+        # Download documentation as .docx
+        st.subheader("Export Documentation")
+        docx_file = create_docx_from_markdown(documentation_text)
+        if docx_file:
+            st.download_button(
+                label="Download Documentation as DOCX",
+                data=docx_file,
+                file_name=f"factory_energy_documentation_{datetime.now().strftime('%Y%m%d_%H%M%S')}.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            )
 
 if __name__ == "__main__":
     main()
