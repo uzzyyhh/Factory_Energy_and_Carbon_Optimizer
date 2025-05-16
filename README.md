@@ -1,4 +1,3 @@
-markdown
 # Factory Energy & Carbon Optimizer
 
 ![Streamlit](https://img.shields.io/badge/Streamlit-FF4B4B?style=for-the-badge&logo=Streamlit&logoColor=white)
@@ -53,100 +52,82 @@ The Factory Energy & Carbon Optimizer is a Streamlit web application that:
 
 ## Installation
 
-1. Clone the repository:
+### 1. Clone the repository:
+```
 git clone https://github.com/uzzyyhh/Factory_Energy_and_Carbon_Optimizer.git
 cd Factory_Energy_and_Carbon_Optimizer
-Create and activate a virtual environment:
+```
+### Create and activate a virtual environment:
 
+```
 python -m venv venv
 source venv/bin/activate  # On Windows use `venv\Scripts\activate`
-Install dependencies:
-
+```
+### Install dependencies:
+```
 pip install -r requirements.txt
+```
+### Usage
 
-Usage
-Run the Streamlit application:
-
+#### Run the Streamlit application:
+```
 streamlit run app.py
-Configure your factory parameters in the web interface:
+```
 
-Number and energy consumption of machines
+### Configure your factory parameters in the web interface:
+- Number and energy consumption of machines
+- Inefficiency probabilities
+- Simulation duration
+- Cost per kWh
+- Model type
 
-Inefficiency probabilities
+### View results across four tabs:
+- Simulation: Configure and run simulations
+- Results: View optimization metrics and energy visualizations
+- Carbon Impact: Analyze CO2 reductions and sustainability impact
 
-Simulation duration
+### Documentation: Access detailed system documentation
 
-Cost per kWh
+- Technical Approach
+- Data Simulation
 
-Model type
+### Generates synthetic factory data with:
 
-View results across four tabs:
+- Time-based features (hour, day of week)
+- Shift patterns
+- Machine inefficiencies
+- Temperature-dependent HVAC usage
+- Solar availability curves
+- Machine Learning
+- Random Forest/Linear Regression models predict:
+- Optimal number of active machines
+- Energy consumption patterns
+- Features include shift type, hour, and day of week
+- Optimization
+  
+### Q-learning agent with:
 
-Simulation: Configure and run simulations
+- States: (shift, hour, solar availability)
+- Actions: Shift heavy/medium machines or no action
+- Reward: Negative CO2 emissions
+- Learning rate: 0.1, discount factor: 0.9
 
-Results: View optimization metrics and energy visualizations
+### Sustainability Impact:
+- Energy Efficiency: Typically achieves 5-20% energy reductions
+- Carbon Reduction: Can reduce CO2 emissions by 5,000-15,000 kg over 3 months
+- nEquivalent to planting 240-720 trees annually
 
-Carbon Impact: Analyze CO2 reductions and sustainability impact
+### Supports UN SDGs:
+- SDG 7: Affordable and Clean Energy
+- SDG 13: Climate Action
 
-Documentation: Access detailed system documentation
+### Future Improvements
+- Add seasonal variation models
+- Integrate real-time IoT data
+- Implement deep reinforcement learning
+- Add multi-factory optimization
+- Incorporate carbon credit tracking
 
-Technical Approach
-Data Simulation
-Generates synthetic factory data with:
+### License
+- This project is licensed under the MIT License - see the LICENSE file for details.
 
-Time-based features (hour, day of week)
-
-Shift patterns
-
-Machine inefficiencies
-
-Temperature-dependent HVAC usage
-
-Solar availability curves
-
-Machine Learning
-Random Forest/Linear Regression models predict:
-
-Optimal number of active machines
-
-Energy consumption patterns
-
-Features include shift type, hour, and day of week
-
-Optimization
-Q-learning agent with:
-
-States: (shift, hour, solar availability)
-
-Actions: Shift heavy/medium machines or no action
-
-Reward: Negative CO2 emissions
-
-Learning rate: 0.1, discount factor: 0.9
-
-Sustainability Impact
-Energy Efficiency: Typically achieves 5-20% energy reductions
-
-Carbon Reduction: Can reduce CO2 emissions by 5,000-15,000 kg over 3 months
-
-Equivalent to planting 240-720 trees annually
-
-Supports UN SDGs:
-
-SDG 7: Affordable and Clean Energy
-
-SDG 13: Climate Action
-
-Future Improvements
-Add seasonal variation models
-
-Integrate real-time IoT data
-
-Implement deep reinforcement learning
-
-Add multi-factory optimization
-
-Incorporate carbon credit tracking
-
-License
-This project is licensed under the MIT License - see the LICENSE file for details.
