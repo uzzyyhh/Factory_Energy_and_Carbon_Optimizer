@@ -40,7 +40,7 @@ def process_uploaded_data(file):
         if not all(col in df.columns for col in required_cols):
             raise ValueError(f"Missing required columns. Expected: {required_cols}")
 
-        df['Timestamp'] = pd.to_datetime(df['Timestamp'])
+        df['Timestamp'] = pd.to_datetime(df['Timestamp'], format='%m/%d/%y %H:%M')
         df = df.rename(columns={
             'Total Consumption (kWh)': 'Total_Energy',
             'Machine 1 (kWh)': 'Energy_Heavy',
@@ -63,13 +63,16 @@ def process_uploaded_data(file):
         choices = ['weekend', 'day', 'night']
         df['Shift'] = np.select(conditions, choices, default='overnight')
 
-        df['Heavy_On'] = (df['Energy_Heavy'] / df['Energy_Heavy'].max() * 5).round().clip(0, 5)
-        df['Medium_On'] = (df['Energy_Medium'] / df['Energy_Medium'].max() * 10).round().clip(0, 10)
+        # Derive Intended_On based on energy usage patterns
+        max_heavy_energy = df['Energy_Heavy'].max()
+        max_medium_energy = df['Energy_Medium'].max()
+        df['Intended_Heavy_On'] = ((df['Energy_Heavy'] / max_heavy_energy) * 5).round().clip(0, 5)
+        df['Intended_Heavy_On'] = np.where(df['Is_Working_Hours'], df['Intended_Heavy_On'], 0)
+        df['Intended_Medium_On'] = ((df['Energy_Medium'] / max_medium_energy) * 10).round().clip(0, 10)
+        df['Intended_Medium_On'] = np.where(df['Is_Working_Hours'], df['Intended_Medium_On'], 0)
 
-        shift_map_heavy = {'day': 5, 'night': 2, 'overnight': 0, 'weekend': 0}
-        shift_map_medium = {'day': 10, 'night': 10, 'overnight': 2, 'weekend': 2}
-        df['Intended_Heavy_On'] = df['Shift'].map(shift_map_heavy)
-        df['Intended_Medium_On'] = df['Shift'].map(shift_map_medium)
+        df['Heavy_On'] = df['Intended_Heavy_On'].copy()
+        df['Medium_On'] = df['Intended_Medium_On'].copy()
 
         df['Temperature'] = 30 + 5 * np.sin(2 * np.pi * (df['Hour'] - 14) / 24) + np.random.normal(0, 1, len(df))
         df['HVAC_Inefficient'] = (df['HVAC_Energy'] > (20 + 10 * np.maximum(df['Temperature'] - 22, 0))).astype(int)
@@ -77,7 +80,6 @@ def process_uploaded_data(file):
         df['Solar_Available'] = np.where((df['Hour'] >= 6) & (df['Hour'] <= 18), 100 * np.sin(np.pi * (df['Hour'] - 6) / 12), 0)
         df['Solar_Used'] = np.minimum(df['Solar_Available'], df['Total_Energy'])
         df['Grid_Energy'] = np.maximum(0, df['Total_Energy'] - df['Solar_Used'])
-
         df['CO2_Emissions'] = df['Grid_Energy'] * GRID_EMISSION_FACTOR + df['Solar_Used'] * SOLAR_EMISSION_FACTOR
 
         logger.info("Processed uploaded data with columns: %s", df.columns.tolist())
@@ -177,8 +179,9 @@ def get_simulated_data(_num_heavy, _energy_heavy, _num_medium, _energy_medium, _
 @st.cache_resource
 def train_model(df, target, model_type, cache_key):
     try:
-        data = df[["Shift", "Hour", "Day_of_Week", target]].dropna()
-        X = data[["Shift", "Hour", "Day_of_Week"]]
+        # Enhanced feature set for better prediction
+        data = df[["Shift", "Hour", "Day_of_Week", "Temperature", "Is_Working_Hours", target]].dropna()
+        X = data[["Shift", "Hour", "Day_of_Week", "Temperature", "Is_Working_Hours"]]
         y = data[target]
 
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
@@ -187,7 +190,10 @@ def train_model(df, target, model_type, cache_key):
             transformers=[("shift", OneHotEncoder(drop="first", sparse_output=False), ["Shift"])],
             remainder="passthrough"
         )
-        model = RandomForestRegressor(n_estimators=100, random_state=42) if model_type == "Random Forest" else LinearRegression()
+        if model_type == "Random Forest":
+            model = RandomForestRegressor(n_estimators=50, max_depth=10, random_state=42)  # Optimized for efficiency
+        else:
+            model = LinearRegression()
         pipeline = Pipeline([("preprocessor", preprocessor), ("regressor", model)])
         pipeline.fit(X_train, y_train)
         y_pred = pipeline.predict(X_test)
@@ -241,7 +247,7 @@ def detect_inefficiencies(df):
     if not hvac_ineff.empty:
         inefficiencies.append(f"HVAC operating inefficiently (low temperature threshold) for {len(hvac_ineff)} hours.")
 
-    lighting_ineff = df[(~df['Is_Working_Hours']) & (df['Lighting_Energy'] > 10)]
+    lighting_ineff = df[(~df['Is_Working_Hours']) & (df['Lighting_Energy'] > 1.9)]  # Adjusted for p3.xlsx data
     if not lighting_ineff.empty:
         inefficiencies.append(f"Lighting left on unnecessarily during {len(lighting_ineff)} non-working hours.")
 
@@ -374,23 +380,23 @@ def main():
                         for i in range(min(100, len(df) - 1)):
                             state = optimizer.get_state(df["Shift"].iloc[i], df["Hour"].iloc[i], df["Solar_Available"].iloc[i])
                             action = optimizer.get_action(state)
-                            reward = -df["CO2_Emissions"].iloc[i] / (df["Total_Energy"].iloc[i] + 1)  # Normalize reward by energy
+                            reward = -df["CO2_Emissions"].iloc[i] / (df["Total_Energy"].iloc[i] + 1)
                             next_state = optimizer.get_state(df["Shift"].iloc[i + 1], df["Hour"].iloc[i + 1], df["Solar_Available"].iloc[i + 1])
                             optimizer.update(state, action, reward, next_state)
 
-                        df["Predicted_Heavy_On"] = heavy_model.predict(df[["Shift", "Hour", "Day_of_Week"]]).round().clip(0, params["num_heavy"])
-                        df["Predicted_Medium_On"] = medium_model.predict(df[["Shift", "Hour", "Day_of_Week"]]).round().clip(0, params["num_medium"])
-                        df["Optimized_Heavy_On"] = df["Predicted_Heavy_On"].copy()
-                        df["Optimized_Medium_On"] = df["Predicted_Medium_On"].copy()
+                        df["Predicted_Heavy_On"] = heavy_model.predict(df[["Shift", "Hour", "Day_of_Week", "Temperature", "Is_Working_Hours"]]).round().clip(0, params["num_heavy"])
+                        df["Predicted_Medium_On"] = medium_model.predict(df[["Shift", "Hour", "Day_of_Week", "Temperature", "Is_Working_Hours"]]).round().clip(0, params["num_medium"])
+                        df["Optimized_Heavy_On"] = df["Intended_Heavy_On"].copy()
+                        df["Optimized_Medium_On"] = df["Intended_Medium_On"].copy()
 
                         for i in range(len(df)):
                             state = optimizer.get_state(df["Shift"].iloc[i], df["Hour"].iloc[i], df["Solar_Available"].iloc[i])
                             action = optimizer.get_action(state, epsilon=0.1)
                             if action == "shift_heavy" and df["Solar_Available"].iloc[i] > 0 and df["Hour"].iloc[i] < 18:
-                                df.loc[i, "Optimized_Heavy_On"] = min(df["Heavy_On"].iloc[i], df["Predicted_Heavy_On"].iloc[i])
+                                df.loc[i, "Optimized_Heavy_On"] = min(df["Predicted_Heavy_On"].iloc[i], params["num_heavy"])
                             elif action == "shift_medium" and df["Solar_Available"].iloc[i] > 0 and df["Hour"].iloc[i] < 18:
-                                df.loc[i, "Optimized_Medium_On"] = min(df["Medium_On"].iloc[i], df["Predicted_Medium_On"].iloc[i])
-                            elif action == "reduce_load":
+                                df.loc[i, "Optimized_Medium_On"] = min(df["Predicted_Medium_On"].iloc[i], params["num_medium"])
+                            elif action == "reduce_load" and df["Hour"].iloc[i] >= 18:
                                 df.loc[i, "Optimized_Heavy_On"] = max(0, df["Optimized_Heavy_On"].iloc[i] - 1)
                                 df.loc[i, "Optimized_Medium_On"] = max(0, df["Optimized_Medium_On"].iloc[i] - 1)
 
@@ -399,15 +405,17 @@ def main():
                         df["Optimized_HVAC_Energy"] = np.where(
                             df["HVAC_Inefficient"] == 0, df["HVAC_Energy"], 20 + 10 * np.maximum(df["Temperature"] - 22, 0)
                         )
-                        df["Optimized_Lighting_Energy"] = np.where(df["Is_Working_Hours"] | (df["Lighting_Energy"] == 10), df["Lighting_Energy"], 10)
+                        df["Optimized_Lighting_Energy"] = np.where(df["Is_Working_Hours"] | (df["Lighting_Energy"] <= 1.9), df["Lighting_Energy"], 1.0)  # Adjusted for p3.xlsx
                         df["Optimized_Total_Energy"] = df[["Optimized_Energy_Heavy", "Optimized_Energy_Medium", "Optimized_HVAC_Energy", "Optimized_Lighting_Energy"]].sum(axis=1)
+
+                        # Maximize solar use
                         df["Optimized_Solar_Used"] = np.minimum(df["Solar_Available"], df["Optimized_Total_Energy"])
                         df["Optimized_Grid_Energy"] = np.maximum(0, df["Optimized_Total_Energy"] - df["Optimized_Solar_Used"])
                         df["Optimized_CO2_Emissions"] = df["Optimized_Grid_Energy"] * GRID_EMISSION_FACTOR + df["Optimized_Solar_Used"] * SOLAR_EMISSION_FACTOR
 
-                        # Cap optimized energy to avoid excessive increases
+                        # Apply energy cap
                         df["Optimized_Total_Energy"] = np.where(df["Optimized_Total_Energy"] > df["Total_Energy"] * MAX_ENERGY_INCREASE,
-                                                              df["Total_Energy"], df["Optimized_Total_Energy"])
+                                                              df["Total_Energy"] * MAX_ENERGY_INCREASE, df["Optimized_Total_Energy"])
                         df["Optimized_Grid_Energy"] = np.maximum(0, df["Optimized_Total_Energy"] - df["Optimized_Solar_Used"])
                         df["Optimized_CO2_Emissions"] = df["Optimized_Grid_Energy"] * GRID_EMISSION_FACTOR + df["Optimized_Solar_Used"] * SOLAR_EMISSION_FACTOR
 
@@ -462,7 +470,7 @@ def main():
                         st.subheader("Daily Savings")
                         df["Date"] = df["Timestamp"].dt.date
                         daily_savings = df.groupby("Date").apply(lambda x: x["Total_Energy"].sum() - x["Optimized_Total_Energy"].sum()).reset_index(name="Savings")
-                        daily_savings = daily_savings[daily_savings["Savings"] != 0]  # Filter out zero savings
+                        daily_savings = daily_savings[daily_savings["Savings"] != 0]
                         fig_savings = px.bar(daily_savings, x="Date", y="Savings", title="Daily Energy Savings (kWh)", color_discrete_sequence=["teal"])
                         fig_savings.update_layout(
                             yaxis_title="Savings (kWh)",
@@ -521,7 +529,7 @@ def main():
                         "CO2_Emissions": "sum",
                         "Optimized_CO2_Emissions": "sum"
                     }).reset_index()
-                    daily_co2 = daily_co2[(daily_co2["CO2_Emissions"] > 0) | (daily_co2["Optimized_CO2_Emissions"] > 0)]  # Filter out zero values
+                    daily_co2 = daily_co2[(daily_co2["CO2_Emissions"] > 0) | (daily_co2["Optimized_CO2_Emissions"] > 0)]
                     fig_daily_co2 = go.Figure()
                     fig_daily_co2.add_trace(go.Bar(
                         x=daily_co2["Date"],
@@ -589,7 +597,7 @@ def main():
         **Features**  
         - **Data Processing**: Handles both simulated and uploaded data, with validation and mapping.  
         - **Inefficiency Detection**: Identifies wasteful energy use (e.g., machines running off-hours).  
-        - **Optimization**: Uses AI to schedule machines efficiently and shift loads to solar hours.  
+        - **Optimization**: Uses Random Forest or Linear Regression with Q-learning to schedule machines efficiently and shift loads to solar hours.  
         - **Visualization**: Interactive plots for energy usage, breakdown, savings, and CO2 emissions.  
         - **Export Options**: CSV for data, DOCX for documentation.
 
