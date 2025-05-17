@@ -15,6 +15,7 @@ import logging
 from datetime import datetime
 from docx import Document
 from io import BytesIO
+import uuid
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, filename='app.log')
@@ -186,15 +187,12 @@ def get_simulated_data(_num_heavy, _energy_heavy, _num_medium, _energy_medium, _
 @st.cache_resource
 def train_model(df, target, model_type, cache_key):
     try:
-        # Split data into working and non-working hours
         working_hours = df[df['Is_Working_Hours']]
         non_working_hours = df[~df['Is_Working_Hours']]
 
-        # Features including lagged variables
         features = ["Shift", "Hour", "Day_of_Week", "Temperature", "Is_Working_Hours", "Energy_Heavy_Lag1", "Energy_Medium_Lag1"]
         metrics = {}
 
-        # Train model for working hours (non-zero targets)
         if not working_hours.empty:
             data = working_hours[features + [target]].dropna()
             X = data[features]
@@ -223,7 +221,6 @@ def train_model(df, target, model_type, cache_key):
         else:
             metrics["working"] = {"MAE": 0, "MSE": 0, "R2": 0}
 
-        # Non-working hours: Predict all zeros (no training needed)
         if not non_working_hours.empty:
             y_pred_non_working = np.zeros(len(non_working_hours))
             y_true_non_working = non_working_hours[target]
@@ -235,7 +232,6 @@ def train_model(df, target, model_type, cache_key):
         else:
             metrics["non_working"] = {"MAE": 0, "MSE": 0, "R2": 0}
 
-        # Combine predictions for full dataset
         full_data = df[features + [target]].dropna()
         X_full = full_data[features]
         y_full = full_data[target]
@@ -244,7 +240,6 @@ def train_model(df, target, model_type, cache_key):
         if not working_hours.empty:
             predictions[X_full.index.isin(working_indices)] = pipeline.predict(X_full.loc[working_indices])
 
-        # Overall metrics
         overall_metrics = {
             "MAE": mean_absolute_error(y_full, predictions),
             "MSE": mean_squared_error(y_full, predictions),
@@ -285,68 +280,157 @@ def create_docx_from_markdown(markdown_text):
         st.error(f"Failed to create .docx: {e}")
         return None
 
-def detect_inefficiencies(df):
-    """Detect inefficiencies in energy consumption data."""
+def detect_inefficiencies(df, num_heavy, num_medium):
+    """Detect inefficiencies in energy consumption data with dynamic thresholds."""
     inefficiencies = []
     
+    # Machine inefficiencies during off-hours
     heavy_ineff = df[(df['Heavy_On'] > df['Intended_Heavy_On']) & (df['Shift'].isin(['overnight', 'weekend']))]
     medium_ineff = df[(df['Medium_On'] > df['Intended_Medium_On']) & (df['Shift'].isin(['overnight', 'weekend']))]
     if not heavy_ineff.empty:
-        inefficiencies.append(f"Heavy machines running unnecessarily during {len(heavy_ineff)} off-hours (overnight/weekend).")
+        inefficiencies.append(f"Heavy machines running unnecessarily during {len(heavy_ineff)} off-hours (overnight/weekend), wasting {heavy_ineff['Energy_Heavy'].sum():.2f} kWh.")
     if not medium_ineff.empty:
-        inefficiencies.append(f"Medium machines running unnecessarily during {len(medium_ineff)} off-hours (overnight/weekend).")
+        inefficiencies.append(f"Medium machines running unnecessarily during {len(medium_ineff)} off-hours (overnight/weekend), wasting {medium_ineff['Energy_Medium'].sum():.2f} kWh.")
 
+    # HVAC inefficiencies
     hvac_ineff = df[df['HVAC_Inefficient'] == 1]
     if not hvac_ineff.empty:
-        inefficiencies.append(f"HVAC operating inefficiently (low temperature threshold) for {len(hvac_ineff)} hours.")
+        excess_hvac_energy = (hvac_ineff['HVAC_Energy'] - (20 + 10 * np.maximum(hvac_ineff['Temperature'] - 22, 0))).sum()
+        inefficiencies.append(f"HVAC operating inefficiently for {len(hvac_ineff)} hours, wasting {excess_hvac_energy:.2f} kWh due to low temperature thresholds.")
 
-    lighting_ineff = df[(~df['Is_Working_Hours']) & (df['Lighting_Energy'] > 1.9)]
+    # Lighting inefficiencies
+    lighting_ineff = df[(~df['Is_Working_Hours']) & (df['Lighting_Energy'] > 10.0)]
     if not lighting_ineff.empty:
-        inefficiencies.append(f"Lighting left on unnecessarily during {len(lighting_ineff)} non-working hours.")
+        excess_lighting_energy = (lighting_ineff['Lighting_Energy'] - 10).sum()
+        inefficiencies.append(f"Lighting left on unnecessarily during {len(lighting_ineff)} non-working hours, wasting {excess_lighting_energy:.2f} kWh.")
 
+    # HVAC during low occupancy
     hvac_low_occupancy = df[(~df['Is_Working_Hours']) & (df['HVAC_Energy'] > 2.0)]
     if not hvac_low_occupancy.empty:
-        inefficiencies.append(f"Excessive HVAC usage during {len(hvac_low_occupancy)} low-occupancy hours (outside working hours).")
+        excess_hvac_low = (hvac_low_occupancy['HVAC_Energy'] - 2).sum()
+        inefficiencies.append(f"Excessive HVAC usage during {len(hvac_low_occupancy)} low-occupancy hours, wasting {excess_hvac_low:.2f} kWh.")
 
+    # Dynamic inconsistency detection using statistical thresholds
     working_hours = df[df['Is_Working_Hours']]
     if not working_hours.empty:
+        heavy_std = working_hours['Energy_Heavy'].std()
         heavy_avg = working_hours['Energy_Heavy'].mean()
-        heavy_inconsistent = working_hours[abs(working_hours['Energy_Heavy'] - heavy_avg) > 0.1 * heavy_avg]
+        heavy_threshold = heavy_avg + 2 * heavy_std  # 2 standard deviations
+        heavy_inconsistent = working_hours[working_hours['Energy_Heavy'] > heavy_threshold]
         if not heavy_inconsistent.empty:
-            inefficiencies.append(f"Inconsistent heavy machine usage during {len(heavy_inconsistent)} working hours (deviation >10% from average).")
-        medium_avg = working_hours['Energy_Medium'].mean()
-        medium_inconsistent = working_hours[abs(working_hours['Energy_Medium'] - medium_avg) > 0.1 * medium_avg]
-        if not medium_inconsistent.empty:
-            inefficiencies.append(f"Inconsistent medium machine usage during {len(medium_inconsistent)} working hours (deviation >10% from average).")
+            excess_heavy = (heavy_inconsistent['Energy_Heavy'] - heavy_avg).sum()
+            inefficiencies.append(f"Inconsistent heavy machine usage during {len(heavy_inconsistent)} working hours (exceeding {heavy_threshold:.2f} kWh), wasting {excess_heavy:.2f} kWh.")
 
+        medium_std = working_hours['Energy_Medium'].std()
+        medium_avg = working_hours['Energy_Medium'].mean()
+        medium_threshold = medium_avg + 2 * medium_std
+        medium_inconsistent = working_hours[working_hours['Energy_Medium'] > medium_threshold]
+        if not medium_inconsistent.empty:
+            excess_medium = (medium_inconsistent['Energy_Medium'] - medium_avg).sum()
+            inefficiencies.append(f"Inconsistent medium machine usage during {len(medium_inconsistent)} working hours (exceeding {medium_threshold:.2f} kWh), wasting {excess_medium:.2f} kWh.")
+
+    # Solar underutilization with dynamic threshold
     solar_hours = df[(df['Hour'] >= 6) & (df['Hour'] <= 18) & (df['Solar_Available'] > 0)]
-    solar_underutilized = solar_hours[solar_hours['Solar_Used'] < 0.5 * solar_hours['Solar_Available']]
-    if not solar_underutilized.empty:
-        inefficiencies.append(f"Solar energy underutilized during {len(solar_underutilized)} solar hours (usage <50% of available).")
+    if not solar_hours.empty:
+        solar_avg_usage = solar_hours['Solar_Used'].mean()
+        solar_underutilized = solar_hours[solar_hours['Solar_Used'] < 0.7 * solar_hours['Solar_Available']]  # 70% threshold
+        if not solar_underutilized.empty:
+            unused_solar = (solar_underutilized['Solar_Available'] - solar_underutilized['Solar_Used']).sum()
+            inefficiencies.append(f"Solar energy underutilized during {len(solar_underutilized)} solar hours (usage <70% of available), missing {unused_solar:.2f} kWh.")
 
     return inefficiencies
 
-def recommend_actions(inefficiencies):
-    """Recommend actions based on detected inefficiencies."""
+def recommend_actions(inefficiencies, df):
+    """Recommend actions based on detected inefficiencies and data patterns."""
     actions = []
+    solar_hours = df[(df['Hour'] >= 6) & (df['Hour'] <= 18) & (df['Solar_Available'] > 0)]
+    solar_usage_ratio = solar_hours['Solar_Used'].sum() / solar_hours['Solar_Available'].sum() if solar_hours['Solar_Available'].sum() > 0 else 0
+
     for ineff in inefficiencies:
         if "Heavy machines running unnecessarily" in ineff:
-            actions.append("Implement strict shutdown protocols for heavy machines during overnight and weekend shifts.")
+            actions.append("Implement automated shutdown protocols for heavy machines during overnight and weekend shifts to prevent unnecessary operation.")
         if "Medium machines running unnecessarily" in ineff:
-            actions.append("Schedule medium machines to operate only during intended shifts (day/night).")
+            actions.append("Schedule medium machines to operate only during intended shifts (day/night) with IoT-based monitoring to enforce compliance.")
         if "HVAC operating inefficiently" in ineff:
-            actions.append("Reset HVAC systems to a 22°C threshold to avoid overcooling.")
+            actions.append("Adjust HVAC systems to maintain a 22°C threshold during working hours and minimize overcooling, potentially saving significant energy.")
         if "Lighting left on unnecessarily" in ineff:
-            actions.append("Install automated lighting controls to turn off lights outside working hours (8 AM–6 PM weekdays).")
+            actions.append("Deploy motion-sensor-based lighting controls to automatically turn off lights outside working hours (8 AM–6 PM weekdays).")
         if "Excessive HVAC usage" in ineff:
-            actions.append("Schedule HVAC to a minimal setting (e.g., 2 kWh) during non-working hours to reduce energy waste.")
+            actions.append("Configure HVAC to a minimal setting (e.g., 2 kWh) during non-working hours to reduce energy waste in low-occupancy periods.")
         if "Inconsistent heavy machine usage" in ineff:
-            actions.append("Use predictive scheduling for heavy machines based on historical averages to smooth out operation during working hours.")
+            actions.append("Implement predictive maintenance and scheduling for heavy machines using real-time data to stabilize usage patterns.")
         if "Inconsistent medium machine usage" in ineff:
-            actions.append("Use predictive scheduling for medium machines based on historical averages to smooth out operation during working hours.")
+            actions.append("Optimize medium machine schedules with machine learning models to align with historical usage averages.")
         if "Solar energy underutilized" in ineff:
-            actions.append("Shift non-critical loads (e.g., medium machines) to solar hours (6 AM–6 PM) to maximize renewable energy usage.")
+            actions.append(f"Shift {int((1 - solar_usage_ratio) * 100)}% of non-critical loads (e.g., medium machines) to solar hours (6 AM–6 PM) to maximize renewable energy usage.")
+
+    # Additional recommendation based on solar usage
+    if solar_usage_ratio < 0.7 and "Solar energy underutilized" not in [ineff.split(' (')[0] for ineff in inefficiencies]:
+        actions.append(f"Increase solar energy utilization (current: {solar_usage_ratio*100:.1f}%) by scheduling high-energy tasks during peak solar hours (10 AM–2 PM).")
+
     return actions
+
+def generate_dynamic_documentation(params, inefficiencies, actions, df):
+    """Generate dynamic documentation based on simulation or uploaded data."""
+    data_source = params.get('data_source', 'Simulated')
+    num_heavy = params.get('num_heavy', 5)
+    energy_heavy = params.get('energy_heavy', 20.0)
+    num_medium = params.get('num_medium', 10)
+    energy_medium = params.get('energy_medium', 10.0)
+    cost_per_kwh = params.get('cost_per_kwh', 0.15)
+    model_type = params.get('model_type', 'Random Forest')
+    baseline_energy = df["Total_Energy"].sum()
+    optimized_energy = df["Optimized_Total_Energy"].sum() if "Optimized_Total_Energy" in df.columns else baseline_energy
+    energy_savings = baseline_energy - optimized_energy
+    baseline_co2 = df["CO2_Emissions"].sum()
+    optimized_co2 = df["Optimized_CO2_Emissions"].sum() if "Optimized_CO2_Emissions" in df.columns else baseline_co2
+    co2_savings = baseline_co2 - optimized_co2
+    trees_equivalent = (co2_savings / 1000) * TREES_PER_TON_CO2
+
+    documentation = f"""
+### Factory Energy & Carbon Optimizer Report
+
+**Overview**  
+This report details the energy and carbon optimization analysis for a factory, processed on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}. The analysis {'uses simulated data' if data_source == 'Simulate Data' else 'processes uploaded data'} to identify inefficiencies, recommend actions, and quantify savings. The tool supports UN Sustainable Development Goals (SDGs) 7 and 13 by reducing industrial energy waste and emissions.
+
+**Configuration**  
+- **Data Source**: {data_source}  
+- **Heavy Machines**: {num_heavy} machines, each consuming {energy_heavy} kW  
+- **Medium Machines**: {num_medium} machines, each consuming {energy_medium} kW  
+- **Cost per kWh**: ${cost_per_kwh:.2f}  
+- **Model Type**: {model_type}  
+- **Data Period**: {df['Timestamp'].min().strftime('%Y-%m-%d')} to {df['Timestamp'].max().strftime('%Y-%m-%d')}  
+- **Total Hours Analyzed**: {len(df)} hours  
+
+**Detected Inefficiencies**  
+{''.join([f'- {ineff}\n' for ineff in inefficiencies]) if inefficiencies else 'No significant inefficiencies detected.'}
+
+**Recommended Actions**  
+{''.join([f'- {action}\n' for action in actions]) if actions else 'No actions required.'}
+
+**Results Summary**  
+- **Baseline Energy**: {baseline_energy:.2f} kWh  
+- **Optimized Energy**: {optimized_energy:.2f} kWh  
+- **Energy Savings**: {energy_savings:.2f} kWh ({(energy_savings / baseline_energy * 100):.2f}% savings)  
+- **Cost Savings**: ${energy_savings * cost_per_kwh:.2f}  
+- **Baseline CO2 Emissions**: {baseline_co2:.2f} kg  
+- **Optimized CO2 Emissions**: {optimized_co2:.2f} kg  
+- **CO2 Savings**: {co2_savings:.2f} kg  
+- **Trees Equivalent**: {trees_equivalent:.2f} trees  
+
+**Technical Details**  
+- **Simulation Assumptions**:  
+  - Shifts: Day (8 AM–4 PM weekdays), Night (4 PM–12 AM weekdays), Overnight (12 AM–8 AM weekdays), Weekend (minimal operation).  
+  - Emission Factors: Grid ({GRID_EMISSION_FACTOR} kg CO2/kWh), Solar ({SOLAR_EMISSION_FACTOR} kg CO2/kWh).  
+  - Solar Availability: 100 kW peak from 6 AM–6 PM.  
+  - Carbon Offset: {TREES_PER_TON_CO2} trees per ton of CO2 absorbed annually.  
+- **Optimization**: Uses {model_type} for predicting machine schedules, combined with Q-learning for carbon-aware load shifting.  
+- **Data Processing**: {'Synthetic data generated with configurable inefficiencies.' if data_source == 'Simulate Data' else 'Uploaded data validated and mapped to internal format.'}
+
+**Conclusion**  
+The analysis identified key inefficiencies and provided actionable recommendations to reduce energy consumption and emissions. By implementing the suggested actions, the factory can achieve significant cost and environmental benefits, aligning with sustainable industrial practices.
+"""
+    return documentation
 
 def main():
     st.set_page_config(page_title="Factory Energy & Carbon Optimizer", layout="wide")
@@ -425,7 +509,7 @@ def main():
             else:
                 try:
                     st.subheader("Detected Inefficiencies")
-                    inefficiencies = detect_inefficiencies(df)
+                    inefficiencies = detect_inefficiencies(df, params["num_heavy"], params["num_medium"])
                     if inefficiencies:
                         for ineff in inefficiencies:
                             st.write(f"- {ineff}")
@@ -433,7 +517,7 @@ def main():
                         st.write("No significant inefficiencies detected.")
 
                     st.subheader("Recommended Actions")
-                    actions = recommend_actions(inefficiencies)
+                    actions = recommend_actions(inefficiencies, df)
                     if actions:
                         for action in actions:
                             st.write(f"- {action}")
@@ -492,7 +576,7 @@ def main():
                         df["Optimized_HVAC_Energy"] = np.where(
                             df["HVAC_Inefficient"] == 0, df["HVAC_Energy"], 20 + 10 * np.maximum(df["Temperature"] - 22, 0)
                         )
-                        df["Optimized_Lighting_Energy"] = np.where(df["Is_Working_Hours"] | (df["Lighting_Energy"] <= 1.9), df["Lighting_Energy"], 1.0)
+                        df["Optimized_Lighting_Energy"] = np.where(df["Is_Working_Hours"] | (df["Lighting_Energy"] <= 10.0), df["Lighting_Energy"], 10.0)
                         df["Optimized_Total_Energy"] = df[["Optimized_Energy_Heavy", "Optimized_Energy_Medium", "Optimized_HVAC_Energy", "Optimized_Lighting_Energy"]].sum(axis=1)
 
                         df["Optimized_Solar_Used"] = np.minimum(df["Solar_Available"], df["Optimized_Total_Energy"])
@@ -656,45 +740,18 @@ def main():
 
     with tab4:
         st.header("Documentation")
-        documentation_text = """
-        ### Factory Energy & Carbon Optimizer
-
-        **Overview**  
-        The Factory Energy & Carbon Optimizer is an AI-driven tool designed to simulate or analyze energy consumption and carbon emissions in a factory environment. It supports both synthetic data generation and user-uploaded data (Excel/CSV) to identify inefficiencies (e.g., idle machines, overheating HVAC) and recommend actions to reduce energy waste and CO2 emissions. The tool aligns with UN Sustainable Development Goals (SDGs) 7 and 13. Built as a Streamlit web application, it provides an interactive interface for configuring simulations, uploading data, viewing results, and exporting data.
-
-        **Data Sources**  
-        - **Simulated Data**: Generates synthetic hourly energy consumption data for heavy/medium machines, HVAC, and lighting, with configurable inefficiencies and solar availability.  
-        - **Uploaded Data**: Accepts Excel/CSV files with columns: `Timestamp`, `Total Consumption (kWh)`, `Machine 1 (kWh)`, `Machine 2 (kWh)`, `HVAC (kWh)`, `Lighting (kWh)`, `Other (kWh)`. The data is mapped to internal formats for analysis and optimization.
-
-        **Simulation Assumptions**  
-        - **Time Period**: Starts May 17, 2025, with durations (1 week: 168 hours, 1 month: 720 hours, 3 months: 2160 hours). For uploaded data, uses provided timestamps.  
-        - **Shifts and Occupancy**:  
-          - Day Shift: Weekdays, 8 AM–4 PM, full operation.  
-          - Night Shift: Weekdays, 4 PM–12 AM, reduced heavy machines.  
-          - Overnight Shift: Weekdays, 12 AM–8 AM, minimal operation.  
-          - Weekend: Minimal operation.  
-        - **Emission Factors**: Grid (0.5 kg CO2/kWh), Solar (0.05 kg CO2/kWh).  
-        - **Equipment Profiles**: Configurable for simulation; for uploaded data, assumes 5 heavy machines (20 kW each) and 10 medium machines (10 kW each).  
-        - **Inefficiencies**: Detected in uploaded data (e.g., machines running off-hours, inefficient HVAC, lighting overuse).  
-        - **Solar Availability**: Peaks at 100 kW from 6 AM–6 PM, zero at night.  
-        - **Carbon Offset**: 48 trees absorb 1 ton of CO2 annually.
-
-        **Features**  
-        - **Data Processing**: Handles both simulated and uploaded data, with validation and mapping.  
-        - **Inefficiency Detection**: Identifies wasteful energy use (e.g., machines running off-hours, HVAC overuse, solar underutilization).  
-        - **Optimization**: Uses Random Forest or Linear Regression with Q-learning to schedule machines efficiently and shift loads to solar hours.  
-        - **Visualization**: Interactive plots for energy usage, breakdown, savings, and CO2 emissions.  
-        - **Export Options**: CSV for data, DOCX for documentation.
-
-        **Usage**  
-        1. Select data source (simulate or upload) in the Simulation tab.  
-        2. Configure parameters or upload a file and run the analysis.  
-        3. View inefficiencies, recommendations, and optimized results in the Results tab.  
-        4. Analyze carbon impact in the Carbon Impact tab.  
-        5. Export data or documentation as needed.
-
-        This tool demonstrates AI-driven sustainability for industrial operations.
-        """
+        if "df" in st.session_state and "params" in st.session_state:
+            df = st.session_state["df"]
+            params = st.session_state["params"]
+            inefficiencies = detect_inefficiencies(df, params["num_heavy"], params["num_medium"])
+            actions = recommend_actions(inefficiencies, df)
+            documentation_text = generate_dynamic_documentation(params, inefficiencies, actions, df)
+        else:
+            documentation_text = """
+            ### Factory Energy & Carbon Optimizer
+            **Overview**  
+            Please run a simulation or upload data to generate a detailed report.
+            """
         st.markdown(documentation_text)
 
         st.subheader("Export Documentation")
