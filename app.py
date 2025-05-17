@@ -25,6 +25,78 @@ GRID_EMISSION_FACTOR = 0.5  # kg CO2/kWh for grid
 SOLAR_EMISSION_FACTOR = 0.05  # kg CO2/kWh for solar
 TREES_PER_TON_CO2 = 48  # Trees per ton of CO2 absorbed
 
+def process_uploaded_data(file):
+    """Process uploaded Excel/CSV file and map to internal format."""
+    try:
+        if file.name.endswith('.xlsx'):
+            df = pd.read_excel(file)
+        elif file.name.endswith('.csv'):
+            df = pd.read_csv(file)
+        else:
+            raise ValueError("Unsupported file format. Please upload .xlsx or .csv.")
+
+        # Validate required columns
+        required_cols = ['Timestamp', 'Total Consumption (kWh)', 'Machine 1 (kWh)', 'Machine 2 (kWh)', 'HVAC (kWh)', 'Lighting (kWh)', 'Other (kWh)']
+        if not all(col in df.columns for col in required_cols):
+            raise ValueError(f"Missing required columns. Expected: {required_cols}")
+
+        # Convert Timestamp to datetime
+        df['Timestamp'] = pd.to_datetime(df['Timestamp'])
+
+        # Map columns to internal format
+        df = df.rename(columns={
+            'Total Consumption (kWh)': 'Total_Energy',
+            'Machine 1 (kWh)': 'Energy_Heavy',
+            'Machine 2 (kWh)': 'Energy_Medium',
+            'HVAC (kWh)': 'HVAC_Energy',
+            'Lighting (kWh)': 'Lighting_Energy',
+            'Other (kWh)': 'Other_Energy'
+        })
+
+        # Add derived columns
+        df['Day_of_Week'] = df['Timestamp'].dt.dayofweek
+        df['Hour'] = df['Timestamp'].dt.hour
+        df['Is_Weekday'] = df['Day_of_Week'] < 5
+        df['Is_Working_Hours'] = df['Is_Weekday'] & (df['Hour'] >= 8) & (df['Hour'] < 18)
+
+        # Shift logic
+        conditions = [
+            (~df['Is_Weekday']),
+            (df['Is_Weekday'] & (df['Hour'] >= 8) & (df['Hour'] < 16)),
+            (df['Is_Weekday'] & (df['Hour'] >= 16) & (df['Hour'] < 24))
+        ]
+        choices = ['weekend', 'day', 'night']
+        df['Shift'] = np.select(conditions, choices, default='overnight')
+
+        # Estimate machine counts (assuming machines are either on or off)
+        df['Heavy_On'] = (df['Energy_Heavy'] / df['Energy_Heavy'].max() * 5).round().clip(0, 5)  # Assume max 5 heavy machines
+        df['Medium_On'] = (df['Energy_Medium'] / df['Energy_Medium'].max() * 10).round().clip(0, 10)  # Assume max 10 medium machines
+
+        # Intended schedules
+        shift_map_heavy = {'day': 5, 'night': 2, 'overnight': 0, 'weekend': 0}
+        shift_map_medium = {'day': 10, 'night': 10, 'overnight': 2, 'weekend': 2}
+        df['Intended_Heavy_On'] = df['Shift'].map(shift_map_heavy)
+        df['Intended_Medium_On'] = df['Shift'].map(shift_map_medium)
+
+        # Simulate temperature and HVAC inefficiency
+        df['Temperature'] = 30 + 5 * np.sin(2 * np.pi * (df['Hour'] - 14) / 24) + np.random.normal(0, 1, len(df))
+        df['HVAC_Inefficient'] = (df['HVAC_Energy'] > (20 + 10 * np.maximum(df['Temperature'] - 22, 0))).astype(int)
+
+        # Solar energy
+        df['Solar_Available'] = np.where((df['Hour'] >= 6) & (df['Hour'] <= 18), 100 * np.sin(np.pi * (df['Hour'] - 6) / 12), 0)
+        df['Solar_Used'] = np.minimum(df['Solar_Available'], df['Total_Energy'])
+        df['Grid_Energy'] = np.maximum(0, df['Total_Energy'] - df['Solar_Used'])
+
+        # Emissions
+        df['CO2_Emissions'] = df['Grid_Energy'] * GRID_EMISSION_FACTOR + df['Solar_Used'] * SOLAR_EMISSION_FACTOR
+
+        logger.info("Processed uploaded data with columns: %s", df.columns.tolist())
+        return df
+    except Exception as e:
+        logger.error("Failed to process uploaded data: %s", e)
+        st.error(f"Failed to process uploaded data: {e}")
+        return None
+
 def simulate_factory_data(num_heavy, energy_heavy, num_medium, energy_medium, p_ineff, q_ineff, r_ineff, hours=720):
     """Simulate factory energy consumption with inefficiencies and solar data."""
     try:
@@ -173,6 +245,44 @@ def create_docx_from_markdown(markdown_text):
         st.error(f"Failed to create .docx: {e}")
         return None
 
+def detect_inefficiencies(df):
+    """Detect inefficiencies in energy consumption data."""
+    inefficiencies = []
+    
+    # Machine inefficiencies (running outside intended schedules)
+    heavy_ineff = df[(df['Heavy_On'] > df['Intended_Heavy_On']) & (df['Shift'].isin(['overnight', 'weekend']))]
+    medium_ineff = df[(df['Medium_On'] > df['Intended_Medium_On']) & (df['Shift'].isin(['overnight', 'weekend']))]
+    if not heavy_ineff.empty:
+        inefficiencies.append(f"Heavy machines running unnecessarily during {len(heavy_ineff)} off-hours (overnight/weekend).")
+    if not medium_ineff.empty:
+        inefficiencies.append(f"Medium machines running unnecessarily during {len(medium_ineff)} off-hours (overnight/weekend).")
+
+    # HVAC inefficiencies
+    hvac_ineff = df[df['HVAC_Inefficient'] == 1]
+    if not hvac_ineff.empty:
+        inefficiencies.append(f"HVAC operating inefficiently (low temperature threshold) for {len(hvac_ineff)} hours.")
+
+    # Lighting inefficiencies
+    lighting_ineff = df[(~df['Is_Working_Hours']) & (df['Lighting_Energy'] > 10)]
+    if not lighting_ineff.empty:
+        inefficiencies.append(f"Lighting left on unnecessarily during {len(lighting_ineff)} non-working hours.")
+
+    return inefficiencies
+
+def recommend_actions(inefficiencies):
+    """Recommend actions based on detected inefficiencies."""
+    actions = []
+    for ineff in inefficiencies:
+        if "Heavy machines" in ineff:
+            actions.append("Implement strict shutdown protocols for heavy machines during overnight and weekend shifts.")
+        if "Medium machines" in ineff:
+            actions.append("Schedule medium machines to operate only during intended shifts (day/night).")
+        if "HVAC" in ineff:
+            actions.append("Reset HVAC systems to a 22°C threshold to avoid overcooling.")
+        if "Lighting" in ineff:
+            actions.append("Install automated lighting controls to turn off lights outside working hours (8 AM–6 PM weekdays).")
+    return actions
+
 def main():
     st.set_page_config(page_title="Factory Energy & Carbon Optimizer", layout="wide")
     st.title("Factory Energy & Carbon Optimizer")
@@ -188,29 +298,55 @@ def main():
 
     with tab1:
         st.header("Factory Setup")
-        col1, col2 = st.columns(2)
-        with col1:
-            num_heavy = st.number_input("Number of Heavy Machines", min_value=1, value=5, step=1)
-            energy_heavy = st.number_input("Energy per Heavy Machine (kW)", min_value=0.1, value=20.0, step=0.5)
-            num_medium = st.number_input("Number of Medium Machines", min_value=1, value=10, step=1)
-            energy_medium = st.number_input("Energy per Medium Machine (kW)", min_value=0.1, value=10.0, step=0.5)
-        with col2:
-            p_ineff = st.slider("Machine Inefficiency Probability", 0.0, 1.0, 0.1, 0.01)
-            q_ineff = st.slider("HVAC Inefficiency Probability", 0.0, 1.0, 0.2, 0.01)
-            r_ineff = st.slider("Lighting Inefficiency Probability", 0.0, 1.0, 0.1, 0.01)
-            duration = st.selectbox("Simulation Duration", ["1 Week (168h)", "1 Month (720h)", "3 Months (2160h)"], index=1)
-            hours = {"1 Week (168h)": 168, "1 Month (720h)": 720, "3 Months (2160h)": 2160}[duration]
+        data_source = st.radio("Select Data Source", ["Simulate Data", "Upload Data"])
+
+        if data_source == "Simulate Data":
+            col1, col2 = st.columns(2)
+            with col1:
+                num_heavy = st.number_input("Number of Heavy Machines", min_value=1, value=5, step=1)
+                energy_heavy = st.number_input("Energy per Heavy Machine (kW)", min_value=0.1, value=20.0, step=0.5)
+                num_medium = st.number_input("Number of Medium Machines", min_value=1, value=10, step=1)
+                energy_medium = st.number_input("Energy per Medium Machine (kW)", min_value=0.1, value=10.0, step=0.5)
+            with col2:
+                p_ineff = st.slider("Machine Inefficiency Probability", 0.0, 1.0, 0.1, 0.01)
+                q_ineff = st.slider("HVAC Inefficiency Probability", 0.0, 1.0, 0.2, 0.01)
+                r_ineff = st.slider("Lighting Inefficiency Probability", 0.0, 1.0, 0.1, 0.01)
+                duration = st.selectbox("Simulation Duration", ["1 Week (168h)", "1 Month (720h)", "3 Months (2160h)"], index=1)
+                hours = {"1 Week (168h)": 168, "1 Month (720h)": 720, "3 Months (2160h)": 2160}[duration]
+        else:
+            uploaded_file = st.file_uploader("Upload Energy Data (Excel/CSV)", type=['xlsx', 'csv'])
+            num_heavy = 5  # Default for uploaded data
+            energy_heavy = 20.0  # Default for uploaded data
+            num_medium = 10  # Default for uploaded data
+            energy_medium = 10.0  # Default for uploaded data
+            p_ineff = q_ineff = r_ineff = 0.1  # Defaults for uploaded data
+            hours = None
+
         cost_per_kwh = st.number_input("Cost per kWh ($)", min_value=0.0, value=0.15, step=0.01)
         model_type = st.selectbox("Prediction Model", ["Random Forest", "Linear Regression"])
 
-        if st.button("Run Simulation"):
-            with st.spinner("Simulating..."):
-                df = get_simulated_data(num_heavy, energy_heavy, num_medium, energy_medium, p_ineff, q_ineff, r_ineff, hours)
+        if st.button("Run"):
+            with st.spinner("Processing..."):
+                if data_source == "Simulate Data":
+                    df = get_simulated_data(num_heavy, energy_heavy, num_medium, energy_medium, p_ineff, q_ineff, r_ineff, hours)
+                else:
+                    if uploaded_file is None:
+                        st.error("Please upload a file.")
+                        return
+                    df = process_uploaded_data(uploaded_file)
+
                 if df is not None:
                     st.session_state["df"] = df
-                    st.session_state["params"] = {"num_heavy": num_heavy, "energy_heavy": energy_heavy, "num_medium": num_medium,
-                                                "energy_medium": energy_medium, "cost_per_kwh": cost_per_kwh, "model_type": model_type}
-                    st.success("Simulation completed!")
+                    st.session_state["params"] = {
+                        "num_heavy": num_heavy,
+                        "energy_heavy": energy_heavy,
+                        "num_medium": num_medium,
+                        "energy_medium": energy_medium,
+                        "cost_per_kwh": cost_per_kwh,
+                        "model_type": model_type,
+                        "data_source": data_source
+                    }
+                    st.success("Data processed successfully!")
                     st.rerun()
 
     with tab2:
@@ -222,9 +358,27 @@ def main():
                            "Day_of_Week", "Heavy_On", "Medium_On", "Energy_Heavy", "Energy_Medium", "HVAC_Energy",
                            "Lighting_Energy", "Temperature", "HVAC_Inefficient", "Is_Working_Hours", "Solar_Used", "Grid_Energy"]
             if not all(col in df.columns for col in required_cols):
-                st.error("Missing required columns. Please re-run the simulation.")
+                st.error("Missing required columns. Please re-run the simulation or upload valid data.")
             else:
                 try:
+                    # Detect inefficiencies
+                    st.subheader("Detected Inefficiencies")
+                    inefficiencies = detect_inefficiencies(df)
+                    if inefficiencies:
+                        for ineff in inefficiencies:
+                            st.write(f"- {ineff}")
+                    else:
+                        st.write("No significant inefficiencies detected.")
+
+                    # Recommend actions
+                    st.subheader("Recommended Actions")
+                    actions = recommend_actions(inefficiencies)
+                    if actions:
+                        for action in actions:
+                            st.write(f"- {action}")
+                    else:
+                        st.write("No actions required.")
+
                     with st.spinner("Optimizing..."):
                         heavy_model, heavy_metrics = train_model(df, "Intended_Heavy_On", params["model_type"], "heavy")
                         medium_model, medium_metrics = train_model(df, "Intended_Medium_On", params["model_type"], "medium")
@@ -245,7 +399,7 @@ def main():
 
                         # Carbon optimization
                         optimizer = CarbonOptimizer()
-                        for i in range(min(100, len(df) - 1)):  # Limit iterations for efficiency
+                        for i in range(min(100, len(df) - 1)):
                             state = optimizer.get_state(df["Shift"].iloc[i], df["Hour"].iloc[i], df["Solar_Available"].iloc[i])
                             action = optimizer.get_action(state)
                             reward = -df["CO2_Emissions"].iloc[i]
@@ -253,8 +407,8 @@ def main():
                             optimizer.update(state, action, reward, next_state)
 
                         # Predictions and optimization
-                        df["Predicted_Heavy_On"] = heavy_model.predict(df[["Shift", "Hour", "Day_of_Week"]]).round().clip(0, num_heavy)
-                        df["Predicted_Medium_On"] = medium_model.predict(df[["Shift", "Hour", "Day_of_Week"]]).round().clip(0, num_medium)
+                        df["Predicted_Heavy_On"] = heavy_model.predict(df[["Shift", "Hour", "Day_of_Week"]]).round().clip(0, params["num_heavy"])
+                        df["Predicted_Medium_On"] = medium_model.predict(df[["Shift", "Hour", "Day_of_Week"]]).round().clip(0, params["num_medium"])
                         df["Optimized_Heavy_On"] = df["Predicted_Heavy_On"].copy()
                         df["Optimized_Medium_On"] = df["Predicted_Medium_On"].copy()
 
@@ -332,7 +486,7 @@ def main():
             df = st.session_state["df"]
             st.header("Carbon Impact")
             if "CO2_Emissions" not in df.columns or "Optimized_CO2_Emissions" not in df.columns:
-                st.error("Carbon data missing. Please re-run the simulation.")
+                st.error("Carbon data missing. Please re-run the simulation or upload valid data.")
             else:
                 try:
                     baseline_co2 = df["CO2_Emissions"].sum()
@@ -399,105 +553,43 @@ def main():
         ### Factory Energy & Carbon Optimizer
 
         **Overview**  
-        The Factory Energy & Carbon Optimizer is an AI-driven tool designed to simulate and optimize energy consumption and carbon emissions in a factory environment. By generating realistic synthetic data and applying machine learning and reinforcement learning, the system identifies inefficiencies (e.g., idle machines, overheating HVAC) and recommends actions to reduce energy waste and CO2 emissions. The tool supports sustainable industrial operations, aligning with UN Sustainable Development Goals (SDGs) 7 (Affordable and Clean Energy) and 13 (Climate Action). Built as a Streamlit web application, it provides an interactive interface for configuring simulations, viewing results, and exporting data.
+        The Factory Energy & Carbon Optimizer is an AI-driven tool designed to simulate or analyze energy consumption and carbon emissions in a factory environment. It supports both synthetic data generation and user-uploaded data (Excel/CSV) to identify inefficiencies (e.g., idle machines, overheating HVAC) and recommend actions to reduce energy waste and CO2 emissions. The tool aligns with UN Sustainable Development Goals (SDGs) 7 and 13. Built as a Streamlit web application, it provides an interactive interface for configuring simulations, uploading data, viewing results, and exporting data.
+
+        **Data Sources**  
+        - **Simulated Data**: Generates synthetic hourly energy consumption data for heavy/medium machines, HVAC, and lighting, with configurable inefficiencies and solar availability.  
+        - **Uploaded Data**: Accepts Excel/CSV files with columns: `Timestamp`, `Total Consumption (kWh)`, `Machine 1 (kWh)`, `Machine 2 (kWh)`, `HVAC (kWh)`, `Lighting (kWh)`, `Other (kWh)`. The data is mapped to internal formats for analysis and optimization.
 
         **Simulation Assumptions**  
-        The system simulates a factory’s energy consumption with the following justified assumptions, based on typical industrial settings:  
-        - **Time Period**: Starts June 1, 2025, with user-selectable durations (1 week: 168 hours, 1 month: 720 hours, 3 months: 2160 hours).  
+        - **Time Period**: For simulation, starts June 1, 2025, with durations (1 week: 168 hours, 1 month: 720 hours, 3 months: 2160 hours). For uploaded data, uses provided timestamps.  
         - **Shifts and Occupancy**:  
-          - **Day Shift**: Weekdays, 8 AM–4 PM, full operation of heavy machines, medium machines, and lighting.  
-          - **Night Shift**: Weekdays, 4 PM–12 AM, 50% heavy machines, full medium machines, reduced lighting.  
-          - **Overnight Shift**: Weekdays, 12 AM–8 AM, no heavy machines, 20% medium machines, minimal lighting.  
-          - **Weekend**: No heavy machines, 20% medium machines, minimal lighting.  
-        - **Emission Factors**:  
-          - Grid electricity: 0.5 kg CO2/kWh (typical for fossil fuel-based grids).  
-          - Solar electricity: 0.05 kg CO2/kWh (accounts for manufacturing and installation emissions).  
-        - **Equipment Profiles**:  
-          - **Heavy Machines**: Default 5 machines, each consuming 20 kW when active, with user-defined counts and energy.  
-          - **Medium Machines**: Default 10 machines, each consuming 10 kW, with user-defined counts and energy.  
-          - **HVAC System**: Base consumption of 20 kW, increases by 10 kW per °C above 22°C (20°C if inefficient).  
-          - **Lighting**: 50 kW during working hours (weekdays, 8 AM–6 PM), 10 kW otherwise.  
-        - **Inefficiencies**:  
-          - Machine inefficiency probability (default 0.1): Machines may run unnecessarily outside intended schedules.  
-          - HVAC inefficiency probability (default 0.2): Lowers temperature threshold to 20°C, increasing cooling demand.  
-          - Lighting inefficiency probability (default 0.1): Lights may remain on at 50 kW outside working hours.  
-        - **Temperature**: Varies daily between 25–35°C with a sinusoidal pattern (peaks at 2 PM) and ±1°C random noise, simulating summer conditions.  
-        - **Solar Availability**: Peaks at 100 kW from 6 AM–6 PM, following a sinusoidal curve, zero at night.  
-        - **Carbon Offset**: 48 trees absorb 1 ton of CO2 annually, used to calculate equivalent tree planting for CO2 savings.  
+          - Day Shift: Weekdays, 8 AM–4 PM, full operation.  
+          - Night Shift: Weekdays, 4 PM–12 AM, reduced heavy machines.  
+          - Overnight Shift: Weekdays, 12 AM–8 AM, minimal operation.  
+          - Weekend: Minimal operation.  
+        - **Emission Factors**: Grid (0.5 kg CO2/kWh), Solar (0.05 kg CO2/kWh).  
+        - **Equipment Profiles**: Configurable for simulation; for uploaded data, assumes 5 heavy machines (20 kW each) and 10 medium machines (10 kW each).  
+        - **Inefficiencies**: Detected in uploaded data (e.g., machines running off-hours, inefficient HVAC, lighting overuse).  
+        - **Solar Availability**: Peaks at 100 kW from 6 AM–6 PM, zero at night.  
+        - **Carbon Offset**: 48 trees absorb 1 ton of CO2 annually.
 
         **Features**  
-        - **Realistic Simulation**: Generates hourly energy consumption data for heavy/medium machines, HVAC, and lighting, incorporating inefficiencies and solar availability.  
-        - **AI-Driven Optimization**: Uses Random Forest or Linear Regression to predict efficient machine schedules and Q-learning to shift loads to solar-heavy hours.  
-        - **Visualization**: Provides interactive plots for energy usage, breakdown, daily savings, CO2 emissions, and emissions breakdown.  
-        - **Export Options**: Downloads simulation data as CSV and documentation as DOCX.  
-        - **User Configurability**: Allows customization of machine counts, energy consumption, inefficiency probabilities, simulation duration, and model type.  
-
-        **Inputs**  
-        - **Machine Configuration**: Number of heavy/medium machines (min: 1, default: 5/10) and energy per machine (min: 0.1 kW, default: 20/10 kW).  
-        - **Inefficiency Probabilities**: Machine (0–1, default: 0.1), HVAC (0–1, default: 0.2), lighting (0–1, default: 0.1).  
-        - **Simulation Duration**: 1 week (168h), 1 month (720h), or 3 months (2160h).  
-        - **Cost per kWh**: Default $0.15, for calculating cost savings.  
-        - **Model Type**: Random Forest (100 estimators) or Linear Regression.  
-
-        **Outputs**  
-        - **Summary Table**: Baseline vs. optimized energy (kWh), savings (kWh, %), cost savings ($), baseline vs. optimized CO2 (kg), CO2 savings (kg), trees equivalent.  
-        - **Model Accuracy Metrics**: Mean Absolute Error (MAE), Mean Squared Error (MSE), and R-squared (R²) for heavy and medium machine prediction models.  
-        - **Visualizations**:  
-          - Energy Usage: Baseline vs. optimized energy over time.  
-          - Energy Breakdown: Stacked plot of machine, HVAC, and lighting energy.  
-          - Daily Savings: Bar chart of daily energy savings.  
-          - Emissions Over Time: Baseline vs. optimized CO2 emissions.  
-          - Emissions Breakdown: Pie chart of CO2 by component.  
-          - Daily CO2 Emissions Comparison: Bar chart comparing daily baseline and optimized CO2 emissions.  
-        - **Exportable Data**: CSV file with all simulation and optimization metrics; DOCX file with this documentation.  
-
-        **AI/ML Approach**  
-        - **Prediction Models**:  
-          - Random Forest (100 estimators) or Linear Regression predicts the number of active heavy and medium machines (`Intended_Heavy_On`, `Intended_Medium_On`) based on shift, hour, and day of week.  
-          - Features are one-hot encoded (shift) and passed through (hour, day of week).  
-          - Train-test split (80% training, 20% testing) ensures robust evaluation.  
-          - Metrics: MAE, MSE, and R² are calculated to assess model performance.  
-        - **Optimization**:  
-          - A Q-learning agent (`CarbonOptimizer`) shifts machine loads to hours with high solar availability to minimize CO2 emissions.  
-          - Actions: Shift heavy machine, shift medium machine, or no action.  
-          - State: Shift type, hour, solar availability (binary).  
-          - Reward: Negative CO2 emissions, encouraging low-carbon schedules.  
-          - Parameters: Learning rate (0.1), discount factor (0.9), exploration rate (0.1).  
-        - **Additional Optimizations**:  
-          - HVAC energy is reduced by resetting inefficient units to a 22°C threshold.  
-          - Lighting energy is optimized by turning off lights outside working hours.  
-
-        **Sustainability Impact**  
-        - **Energy Efficiency**: Achieves significant energy reductions, typically 5–20% depending on inefficiency settings, by eliminating wasteful machine operation, optimizing HVAC, and reducing lighting overuse. For a 1-month simulation with default settings, savings can exceed 10,000 kWh, equivalent to powering several households.  
-        - **Carbon Reduction**: Lowers CO2 emissions by prioritizing solar energy and optimizing schedules, often reducing emissions by 5,000–15,000 kg over 3 months, equivalent to planting 240–720 trees annually. This reduces reliance on fossil fuel-based grid electricity, mitigating climate change impacts.  
-        - **Environmental Benefits**: Beyond CO2, optimization reduces air pollutants (e.g., sulfur dioxide, nitrogen oxides) from grid power, improving local air quality and conserving natural resources by lowering energy demand.  
-        - **UN SDGs**:  
-          - **SDG 7 (Affordable and Clean Energy)**: Promotes renewable energy integration (solar) and enhances energy efficiency, making industrial operations more sustainable and cost-effective.  
-          - **SDG 13 (Climate Action)**: Directly combats climate change by reducing industrial carbon footprints, supporting global efforts to limit warming to 1.5°C.  
-        - **Real-World Applicability**: The system can be adapted to real factories with IoT sensors, enabling precise energy monitoring and optimization. It is scalable to other industries (e.g., manufacturing, logistics) and regions with varying grid emission factors, amplifying global impact.  
-        - **Community and Economic Benefits**: By reducing energy costs (e.g., $1,500–$3,000 monthly with default settings), factories can reinvest savings into operations or employee welfare. Increased solar adoption fosters job creation in renewable energy sectors, supporting local economies.  
-        - **Scalability**: The framework can extend to multi-factory networks or smart grids, optimizing energy across regions. Integration with carbon credit systems could monetize emissions reductions, incentivizing sustainability.  
-
-        **Future Improvements**  
-        - **Seasonal Variations**: Incorporate monthly temperature changes (e.g., winter heating, summer cooling) to enhance simulation realism.  
-        - **Real-Time Data**: Integrate IoT sensors for live energy and weather data, replacing synthetic data.  
-        - **Advanced Models**: Use deep reinforcement learning or neural networks for more complex optimization.  
-        - **Grid Carbon Data**: Incorporate real-time grid emission factors to dynamically adjust schedules.  
-        - **Carbon Credits**: Implement blockchain-based carbon credit tracking for monetizing emissions reductions.  
-        - **Multi-Site Optimization**: Extend the system to optimize energy across multiple factories or buildings.  
+        - **Data Processing**: Handles both simulated and uploaded data, with validation and mapping.  
+        - **Inefficiency Detection**: Identifies wasteful energy use (e.g., machines running off-hours).  
+        - **Optimization**: Uses AI to schedule machines efficiently and shift loads to solar hours.  
+        - **Visualization**: Interactive plots for energy usage, breakdown, savings, and CO2 emissions.  
+        - **Export Options**: CSV for data, DOCX for documentation.
 
         **Usage**  
-        1. Configure parameters in the Simulation tab (machine counts, inefficiencies, duration, etc.).  
-        2. Run the simulation to generate data.  
-        3. View optimization results in the Results tab (energy savings, model accuracy, plots).  
-        4. Analyze carbon impact in the Carbon Impact tab (CO2 savings, emissions breakdown).  
-        5. Export data (CSV) or documentation (DOCX) as needed.  
+        1. Select data source (simulate or upload) in the Simulation tab.  
+        2. Configure parameters or upload a file and run the analysis.  
+        3. View inefficiencies, recommendations, and optimized results in the Results tab.  
+        4. Analyze carbon impact in the Carbon Impact tab.  
+        5. Export data or documentation as needed.
 
-        This tool demonstrates the power of AI in achieving sustainable industrial operations, offering actionable insights for energy and carbon reduction.
+        This tool demonstrates AI-driven sustainability for industrial operations.
         """
         st.markdown(documentation_text)
 
-        # Download documentation as .docx
         st.subheader("Export Documentation")
         docx_file = create_docx_from_markdown(documentation_text)
         if docx_file:
