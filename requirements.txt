@@ -8,3 +8,4 @@ prophet==1.1.5
 reportlab==4.2.2
 python-docx
 openxyl
+rich==13.7.1
