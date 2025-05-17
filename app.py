@@ -63,7 +63,6 @@ def process_uploaded_data(file):
         choices = ['weekend', 'day', 'night']
         df['Shift'] = np.select(conditions, choices, default='overnight')
 
-        # Derive Intended_On based on energy usage patterns
         max_heavy_energy = df['Energy_Heavy'].max()
         max_medium_energy = df['Energy_Medium'].max()
         df['Intended_Heavy_On'] = ((df['Energy_Heavy'] / max_heavy_energy) * 5).round().clip(0, 5)
@@ -81,6 +80,10 @@ def process_uploaded_data(file):
         df['Solar_Used'] = np.minimum(df['Solar_Available'], df['Total_Energy'])
         df['Grid_Energy'] = np.maximum(0, df['Total_Energy'] - df['Solar_Used'])
         df['CO2_Emissions'] = df['Grid_Energy'] * GRID_EMISSION_FACTOR + df['Solar_Used'] * SOLAR_EMISSION_FACTOR
+
+        # Add lagged features
+        df['Energy_Heavy_Lag1'] = df['Energy_Heavy'].shift(1).fillna(df['Energy_Heavy'].mean())
+        df['Energy_Medium_Lag1'] = df['Energy_Medium'].shift(1).fillna(df['Energy_Medium'].mean())
 
         logger.info("Processed uploaded data with columns: %s", df.columns.tolist())
         return df
@@ -139,6 +142,10 @@ def simulate_factory_data(num_heavy, energy_heavy, num_medium, energy_medium, p_
         df["Efficient_Total_Energy"] = df[["Efficient_Energy_Heavy", "Efficient_Energy_Medium", "Efficient_HVAC_Energy", "Efficient_Lighting_Energy"]].sum(axis=1)
         df["Efficient_CO2_Emissions"] = df["Efficient_Total_Energy"] * GRID_EMISSION_FACTOR
 
+        # Add lagged features
+        df['Energy_Heavy_Lag1'] = df['Energy_Heavy'].shift(1).fillna(df['Energy_Heavy'].mean())
+        df['Energy_Medium_Lag1'] = df['Energy_Medium'].shift(1).fillna(df['Energy_Medium'].mean())
+
         logger.info("Simulation completed with columns: %s", df.columns.tolist())
         return df
     except Exception as e:
@@ -179,29 +186,73 @@ def get_simulated_data(_num_heavy, _energy_heavy, _num_medium, _energy_medium, _
 @st.cache_resource
 def train_model(df, target, model_type, cache_key):
     try:
-        # Enhanced feature set for better prediction
-        data = df[["Shift", "Hour", "Day_of_Week", "Temperature", "Is_Working_Hours", target]].dropna()
-        X = data[["Shift", "Hour", "Day_of_Week", "Temperature", "Is_Working_Hours"]]
-        y = data[target]
+        # Split data into working and non-working hours
+        working_hours = df[df['Is_Working_Hours']]
+        non_working_hours = df[~df['Is_Working_Hours']]
 
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+        # Features including lagged variables
+        features = ["Shift", "Hour", "Day_of_Week", "Temperature", "Is_Working_Hours", "Energy_Heavy_Lag1", "Energy_Medium_Lag1"]
+        metrics = {}
 
-        preprocessor = ColumnTransformer(
-            transformers=[("shift", OneHotEncoder(drop="first", sparse_output=False), ["Shift"])],
-            remainder="passthrough"
-        )
-        if model_type == "Random Forest":
-            model = RandomForestRegressor(n_estimators=50, max_depth=10, random_state=42)  # Optimized for efficiency
+        # Train model for working hours (non-zero targets)
+        if not working_hours.empty:
+            data = working_hours[features + [target]].dropna()
+            X = data[features]
+            y = data[target]
+
+            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.1, random_state=42)
+
+            preprocessor = ColumnTransformer(
+                transformers=[("shift", OneHotEncoder(drop="first", sparse_output=False), ["Shift"])],
+                remainder="passthrough"
+            )
+            if model_type == "Random Forest":
+                model = RandomForestRegressor(n_estimators=100, max_depth=15, min_samples_split=5, random_state=42)  # Tuned for better accuracy
+            else:
+                model = LinearRegression()
+            pipeline = Pipeline([("preprocessor", preprocessor), ("regressor", model)])
+            pipeline.fit(X_train, y_train)
+            y_pred = pipeline.predict(X_test)
+            metrics["working"] = {
+                "MAE": mean_absolute_error(y_test, y_pred),
+                "MSE": mean_squared_error(y_test, y_pred),
+                "R2": r2_score(y_test, y_pred)
+            }
         else:
-            model = LinearRegression()
-        pipeline = Pipeline([("preprocessor", preprocessor), ("regressor", model)])
-        pipeline.fit(X_train, y_train)
-        y_pred = pipeline.predict(X_test)
-        mae = mean_absolute_error(y_test, y_pred)
-        mse = mean_squared_error(y_test, y_pred)
-        r2 = r2_score(y_test, y_pred)
+            metrics["working"] = {"MAE": 0, "MSE": 0, "R2": 0}
+
+        # Non-working hours: Predict all zeros (no training needed)
+        if not non_working_hours.empty:
+            y_pred_non_working = np.zeros(len(non_working_hours))
+            y_true_non_working = non_working_hours[target]
+            metrics["non_working"] = {
+                "MAE": mean_absolute_error(y_true_non_working, y_pred_non_working),
+                "MSE": mean_squared_error(y_true_non_working, y_pred_non_working),
+                "R2": r2_score(y_true_non_working, y_pred_non_working) if y_true_non_working.var() > 0 else 0
+            }
+        else:
+            metrics["non_working"] = {"MAE": 0, "MSE": 0, "R2": 0}
+
+        # Combine predictions for full dataset
+        full_data = df[features + [target]].dropna()
+        X_full = full_data[features]
+        y_full = full_data[target]
+        predictions = np.zeros(len(X_full))
+        working_indices = df[df['Is_Working_Hours']].index
+        if not working_hours.empty:
+            predictions[X_full.index.isin(working_indices)] = pipeline.predict(X_full.loc[working_indices])
+
+        # Overall metrics
+        overall_metrics = {
+            "MAE": mean_absolute_error(y_full, predictions),
+            "MSE": mean_squared_error(y_full, predictions),
+            "R2": r2_score(y_full, predictions)
+        }
+        overall_metrics["working"] = metrics["working"]
+        overall_metrics["non_working"] = metrics["non_working"]
+
         joblib.dump(pipeline, f"model_{target}_{model_type.replace(' ', '_')}.joblib")
-        return pipeline, {"MAE": mae, "MSE": mse, "R2": r2}
+        return pipeline, overall_metrics
     except Exception as e:
         logger.error("Model training failed: %s", e)
         st.error(f"Model training failed: {e}")
@@ -247,9 +298,29 @@ def detect_inefficiencies(df):
     if not hvac_ineff.empty:
         inefficiencies.append(f"HVAC operating inefficiently (low temperature threshold) for {len(hvac_ineff)} hours.")
 
-    lighting_ineff = df[(~df['Is_Working_Hours']) & (df['Lighting_Energy'] > 1.9)]  # Adjusted for p3.xlsx data
+    lighting_ineff = df[(~df['Is_Working_Hours']) & (df['Lighting_Energy'] > 1.9)]
     if not lighting_ineff.empty:
         inefficiencies.append(f"Lighting left on unnecessarily during {len(lighting_ineff)} non-working hours.")
+
+    hvac_low_occupancy = df[(~df['Is_Working_Hours']) & (df['HVAC_Energy'] > 2.0)]
+    if not hvac_low_occupancy.empty:
+        inefficiencies.append(f"Excessive HVAC usage during {len(hvac_low_occupancy)} low-occupancy hours (outside working hours).")
+
+    working_hours = df[df['Is_Working_Hours']]
+    if not working_hours.empty:
+        heavy_avg = working_hours['Energy_Heavy'].mean()
+        heavy_inconsistent = working_hours[abs(working_hours['Energy_Heavy'] - heavy_avg) > 0.1 * heavy_avg]
+        if not heavy_inconsistent.empty:
+            inefficiencies.append(f"Inconsistent heavy machine usage during {len(heavy_inconsistent)} working hours (deviation >10% from average).")
+        medium_avg = working_hours['Energy_Medium'].mean()
+        medium_inconsistent = working_hours[abs(working_hours['Energy_Medium'] - medium_avg) > 0.1 * medium_avg]
+        if not medium_inconsistent.empty:
+            inefficiencies.append(f"Inconsistent medium machine usage during {len(medium_inconsistent)} working hours (deviation >10% from average).")
+
+    solar_hours = df[(df['Hour'] >= 6) & (df['Hour'] <= 18) & (df['Solar_Available'] > 0)]
+    solar_underutilized = solar_hours[solar_hours['Solar_Used'] < 0.5 * solar_hours['Solar_Available']]
+    if not solar_underutilized.empty:
+        inefficiencies.append(f"Solar energy underutilized during {len(solar_underutilized)} solar hours (usage <50% of available).")
 
     return inefficiencies
 
@@ -257,14 +328,22 @@ def recommend_actions(inefficiencies):
     """Recommend actions based on detected inefficiencies."""
     actions = []
     for ineff in inefficiencies:
-        if "Heavy machines" in ineff:
+        if "Heavy machines running unnecessarily" in ineff:
             actions.append("Implement strict shutdown protocols for heavy machines during overnight and weekend shifts.")
-        if "Medium machines" in ineff:
+        if "Medium machines running unnecessarily" in ineff:
             actions.append("Schedule medium machines to operate only during intended shifts (day/night).")
-        if "HVAC" in ineff:
+        if "HVAC operating inefficiently" in ineff:
             actions.append("Reset HVAC systems to a 22°C threshold to avoid overcooling.")
-        if "Lighting" in ineff:
+        if "Lighting left on unnecessarily" in ineff:
             actions.append("Install automated lighting controls to turn off lights outside working hours (8 AM–6 PM weekdays).")
+        if "Excessive HVAC usage" in ineff:
+            actions.append("Schedule HVAC to a minimal setting (e.g., 2 kWh) during non-working hours to reduce energy waste.")
+        if "Inconsistent heavy machine usage" in ineff:
+            actions.append("Use predictive scheduling for heavy machines based on historical averages to smooth out operation during working hours.")
+        if "Inconsistent medium machine usage" in ineff:
+            actions.append("Use predictive scheduling for medium machines based on historical averages to smooth out operation during working hours.")
+        if "Solar energy underutilized" in ineff:
+            actions.append("Shift non-critical loads (e.g., medium machines) to solar hours (6 AM–6 PM) to maximize renewable energy usage.")
     return actions
 
 def main():
@@ -367,13 +446,19 @@ def main():
                         st.subheader("Model Accuracy")
                         st.markdown("**Heavy Machines Model**")
                         st.table({
-                            "Metric": ["Mean Absolute Error (MAE)", "Mean Squared Error (MSE)", "R-squared (R²)"],
-                            "Value": [f"{heavy_metrics['MAE']:.4f}", f"{heavy_metrics['MSE']:.4f}", f"{heavy_metrics['R2']:.4f}"]
+                            "Metric": ["Mean Absolute Error (MAE)", "Mean Squared Error (MSE)", "R-squared (R²)",
+                                       "MAE (Working Hours)", "R² (Working Hours)", "MAE (Non-Working Hours)", "R² (Non-Working Hours)"],
+                            "Value": [f"{heavy_metrics['MAE']:.4f}", f"{heavy_metrics['MSE']:.4f}", f"{heavy_metrics['R2']:.4f}",
+                                      f"{heavy_metrics['working']['MAE']:.4f}", f"{heavy_metrics['working']['R2']:.4f}",
+                                      f"{heavy_metrics['non_working']['MAE']:.4f}", f"{heavy_metrics['non_working']['R2']:.4f}"]
                         })
                         st.markdown("**Medium Machines Model**")
                         st.table({
-                            "Metric": ["Mean Absolute Error (MAE)", "Mean Squared Error (MSE)", "R-squared (R²)"],
-                            "Value": [f"{medium_metrics['MAE']:.4f}", f"{medium_metrics['MSE']:.4f}", f"{medium_metrics['R2']:.4f}"]
+                            "Metric": ["Mean Absolute Error (MAE)", "Mean Squared Error (MSE)", "R-squared (R²)",
+                                       "MAE (Working Hours)", "R² (Working Hours)", "MAE (Non-Working Hours)", "R² (Non-Working Hours)"],
+                            "Value": [f"{medium_metrics['MAE']:.4f}", f"{medium_metrics['MSE']:.4f}", f"{medium_metrics['R2']:.4f}",
+                                      f"{medium_metrics['working']['MAE']:.4f}", f"{medium_metrics['working']['R2']:.4f}",
+                                      f"{medium_metrics['non_working']['MAE']:.4f}", f"{medium_metrics['non_working']['R2']:.4f}"]
                         })
 
                         optimizer = CarbonOptimizer()
@@ -384,8 +469,8 @@ def main():
                             next_state = optimizer.get_state(df["Shift"].iloc[i + 1], df["Hour"].iloc[i + 1], df["Solar_Available"].iloc[i + 1])
                             optimizer.update(state, action, reward, next_state)
 
-                        df["Predicted_Heavy_On"] = heavy_model.predict(df[["Shift", "Hour", "Day_of_Week", "Temperature", "Is_Working_Hours"]]).round().clip(0, params["num_heavy"])
-                        df["Predicted_Medium_On"] = medium_model.predict(df[["Shift", "Hour", "Day_of_Week", "Temperature", "Is_Working_Hours"]]).round().clip(0, params["num_medium"])
+                        df["Predicted_Heavy_On"] = heavy_model.predict(df[["Shift", "Hour", "Day_of_Week", "Temperature", "Is_Working_Hours", "Energy_Heavy_Lag1", "Energy_Medium_Lag1"]]).round().clip(0, params["num_heavy"])
+                        df["Predicted_Medium_On"] = medium_model.predict(df[["Shift", "Hour", "Day_of_Week", "Temperature", "Is_Working_Hours", "Energy_Heavy_Lag1", "Energy_Medium_Lag1"]]).round().clip(0, params["num_medium"])
                         df["Optimized_Heavy_On"] = df["Intended_Heavy_On"].copy()
                         df["Optimized_Medium_On"] = df["Intended_Medium_On"].copy()
 
@@ -405,15 +490,13 @@ def main():
                         df["Optimized_HVAC_Energy"] = np.where(
                             df["HVAC_Inefficient"] == 0, df["HVAC_Energy"], 20 + 10 * np.maximum(df["Temperature"] - 22, 0)
                         )
-                        df["Optimized_Lighting_Energy"] = np.where(df["Is_Working_Hours"] | (df["Lighting_Energy"] <= 1.9), df["Lighting_Energy"], 1.0)  # Adjusted for p3.xlsx
+                        df["Optimized_Lighting_Energy"] = np.where(df["Is_Working_Hours"] | (df["Lighting_Energy"] <= 1.9), df["Lighting_Energy"], 1.0)
                         df["Optimized_Total_Energy"] = df[["Optimized_Energy_Heavy", "Optimized_Energy_Medium", "Optimized_HVAC_Energy", "Optimized_Lighting_Energy"]].sum(axis=1)
 
-                        # Maximize solar use
                         df["Optimized_Solar_Used"] = np.minimum(df["Solar_Available"], df["Optimized_Total_Energy"])
                         df["Optimized_Grid_Energy"] = np.maximum(0, df["Optimized_Total_Energy"] - df["Optimized_Solar_Used"])
                         df["Optimized_CO2_Emissions"] = df["Optimized_Grid_Energy"] * GRID_EMISSION_FACTOR + df["Optimized_Solar_Used"] * SOLAR_EMISSION_FACTOR
 
-                        # Apply energy cap
                         df["Optimized_Total_Energy"] = np.where(df["Optimized_Total_Energy"] > df["Total_Energy"] * MAX_ENERGY_INCREASE,
                                                               df["Total_Energy"] * MAX_ENERGY_INCREASE, df["Optimized_Total_Energy"])
                         df["Optimized_Grid_Energy"] = np.maximum(0, df["Optimized_Total_Energy"] - df["Optimized_Solar_Used"])
@@ -596,7 +679,7 @@ def main():
 
         **Features**  
         - **Data Processing**: Handles both simulated and uploaded data, with validation and mapping.  
-        - **Inefficiency Detection**: Identifies wasteful energy use (e.g., machines running off-hours).  
+        - **Inefficiency Detection**: Identifies wasteful energy use (e.g., machines running off-hours, HVAC overuse, solar underutilization).  
         - **Optimization**: Uses Random Forest or Linear Regression with Q-learning to schedule machines efficiently and shift loads to solar hours.  
         - **Visualization**: Interactive plots for energy usage, breakdown, savings, and CO2 emissions.  
         - **Export Options**: CSV for data, DOCX for documentation.
