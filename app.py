@@ -24,26 +24,23 @@ logger = logging.getLogger(__name__)
 GRID_EMISSION_FACTOR = 0.5  # kg CO2/kWh for grid
 SOLAR_EMISSION_FACTOR = 0.05  # kg CO2/kWh for solar
 TREES_PER_TON_CO2 = 48  # Trees per ton of CO2 absorbed
+MAX_ENERGY_INCREASE = 1.1  # Limit optimized energy to 10% above baseline
 
 def process_uploaded_data(file):
     """Process uploaded Excel/CSV file and map to internal format."""
     try:
         if file.name.endswith('.xlsx'):
-            df = pd.read_excel(file)
+            df = pd.read_excel(file, engine='openpyxl')
         elif file.name.endswith('.csv'):
             df = pd.read_csv(file)
         else:
             raise ValueError("Unsupported file format. Please upload .xlsx or .csv.")
 
-        # Validate required columns
         required_cols = ['Timestamp', 'Total Consumption (kWh)', 'Machine 1 (kWh)', 'Machine 2 (kWh)', 'HVAC (kWh)', 'Lighting (kWh)', 'Other (kWh)']
         if not all(col in df.columns for col in required_cols):
             raise ValueError(f"Missing required columns. Expected: {required_cols}")
 
-        # Convert Timestamp to datetime
         df['Timestamp'] = pd.to_datetime(df['Timestamp'])
-
-        # Map columns to internal format
         df = df.rename(columns={
             'Total Consumption (kWh)': 'Total_Energy',
             'Machine 1 (kWh)': 'Energy_Heavy',
@@ -53,13 +50,11 @@ def process_uploaded_data(file):
             'Other (kWh)': 'Other_Energy'
         })
 
-        # Add derived columns
         df['Day_of_Week'] = df['Timestamp'].dt.dayofweek
         df['Hour'] = df['Timestamp'].dt.hour
         df['Is_Weekday'] = df['Day_of_Week'] < 5
         df['Is_Working_Hours'] = df['Is_Weekday'] & (df['Hour'] >= 8) & (df['Hour'] < 18)
 
-        # Shift logic
         conditions = [
             (~df['Is_Weekday']),
             (df['Is_Weekday'] & (df['Hour'] >= 8) & (df['Hour'] < 16)),
@@ -68,26 +63,21 @@ def process_uploaded_data(file):
         choices = ['weekend', 'day', 'night']
         df['Shift'] = np.select(conditions, choices, default='overnight')
 
-        # Estimate machine counts (assuming machines are either on or off)
-        df['Heavy_On'] = (df['Energy_Heavy'] / df['Energy_Heavy'].max() * 5).round().clip(0, 5)  # Assume max 5 heavy machines
-        df['Medium_On'] = (df['Energy_Medium'] / df['Energy_Medium'].max() * 10).round().clip(0, 10)  # Assume max 10 medium machines
+        df['Heavy_On'] = (df['Energy_Heavy'] / df['Energy_Heavy'].max() * 5).round().clip(0, 5)
+        df['Medium_On'] = (df['Energy_Medium'] / df['Energy_Medium'].max() * 10).round().clip(0, 10)
 
-        # Intended schedules
         shift_map_heavy = {'day': 5, 'night': 2, 'overnight': 0, 'weekend': 0}
         shift_map_medium = {'day': 10, 'night': 10, 'overnight': 2, 'weekend': 2}
         df['Intended_Heavy_On'] = df['Shift'].map(shift_map_heavy)
         df['Intended_Medium_On'] = df['Shift'].map(shift_map_medium)
 
-        # Simulate temperature and HVAC inefficiency
         df['Temperature'] = 30 + 5 * np.sin(2 * np.pi * (df['Hour'] - 14) / 24) + np.random.normal(0, 1, len(df))
         df['HVAC_Inefficient'] = (df['HVAC_Energy'] > (20 + 10 * np.maximum(df['Temperature'] - 22, 0))).astype(int)
 
-        # Solar energy
         df['Solar_Available'] = np.where((df['Hour'] >= 6) & (df['Hour'] <= 18), 100 * np.sin(np.pi * (df['Hour'] - 6) / 12), 0)
         df['Solar_Used'] = np.minimum(df['Solar_Available'], df['Total_Energy'])
         df['Grid_Energy'] = np.maximum(0, df['Total_Energy'] - df['Solar_Used'])
 
-        # Emissions
         df['CO2_Emissions'] = df['Grid_Energy'] * GRID_EMISSION_FACTOR + df['Solar_Used'] * SOLAR_EMISSION_FACTOR
 
         logger.info("Processed uploaded data with columns: %s", df.columns.tolist())
@@ -100,13 +90,12 @@ def process_uploaded_data(file):
 def simulate_factory_data(num_heavy, energy_heavy, num_medium, energy_medium, p_ineff, q_ineff, r_ineff, hours=720):
     """Simulate factory energy consumption with inefficiencies and solar data."""
     try:
-        timestamps = pd.date_range(start="2025-06-01 00:00", periods=hours, freq="H")
+        timestamps = pd.date_range(start="2025-05-17 00:00", periods=hours, freq="H")
         df = pd.DataFrame({"Timestamp": timestamps})
         df["Day_of_Week"] = df["Timestamp"].dt.dayofweek
         df["Hour"] = df["Timestamp"].dt.hour
         df["Is_Weekday"] = df["Day_of_Week"] < 5
 
-        # Shift logic
         conditions = [
             (~df["Is_Weekday"]),
             (df["Is_Weekday"] & (df["Hour"] >= 8) & (df["Hour"] < 16)),
@@ -115,37 +104,30 @@ def simulate_factory_data(num_heavy, energy_heavy, num_medium, energy_medium, p_
         choices = ["weekend", "day", "night"]
         df["Shift"] = np.select(conditions, choices, default="overnight")
 
-        # Machine schedules
         shift_map_heavy = {"day": num_heavy, "night": num_heavy // 2, "overnight": 0, "weekend": 0}
         shift_map_medium = {"day": num_medium, "night": num_medium, "overnight": num_medium // 5, "weekend": num_medium // 5}
         df["Intended_Heavy_On"] = df["Shift"].map(shift_map_heavy)
         df["Intended_Medium_On"] = df["Shift"].map(shift_map_medium)
 
-        # Inefficiencies
         df["Heavy_On"] = df["Intended_Heavy_On"] + np.random.binomial(num_heavy - df["Intended_Heavy_On"], p_ineff)
         df["Medium_On"] = df["Intended_Medium_On"] + np.random.binomial(num_medium - df["Intended_Medium_On"], p_ineff)
         df["Energy_Heavy"] = df["Heavy_On"] * energy_heavy
         df["Energy_Medium"] = df["Medium_On"] * energy_medium
 
-        # HVAC and temperature
         df["Temperature"] = 30 + 5 * np.sin(2 * np.pi * (df["Hour"] - 14) / 24) + np.random.normal(0, 1, len(df))
         df["HVAC_Inefficient"] = np.random.choice([0, 1], size=len(df), p=[1 - q_ineff, q_ineff])
         df["HVAC_Energy"] = 20 + 10 * np.maximum(df["Temperature"] - (22 - 2 * df["HVAC_Inefficient"]), 0)
 
-        # Lighting
         df["Is_Working_Hours"] = df["Is_Weekday"] & (df["Hour"] >= 8) & (df["Hour"] < 18)
         df["Lighting_Energy"] = np.where(df["Is_Working_Hours"], 50, np.where(np.random.random(len(df)) < r_ineff, 50, 10))
 
-        # Solar energy
         df["Solar_Available"] = np.where((df["Hour"] >= 6) & (df["Hour"] <= 18), 100 * np.sin(np.pi * (df["Hour"] - 6) / 12), 0)
         df["Solar_Used"] = np.minimum(df["Solar_Available"], df["Energy_Heavy"] + df["Energy_Medium"] + df["HVAC_Energy"] + df["Lighting_Energy"])
         df["Grid_Energy"] = np.maximum(0, df["Energy_Heavy"] + df["Energy_Medium"] + df["HVAC_Energy"] + df["Lighting_Energy"] - df["Solar_Used"])
 
-        # Totals and emissions
         df["Total_Energy"] = df[["Energy_Heavy", "Energy_Medium", "HVAC_Energy", "Lighting_Energy"]].sum(axis=1)
         df["CO2_Emissions"] = df["Grid_Energy"] * GRID_EMISSION_FACTOR + df["Solar_Used"] * SOLAR_EMISSION_FACTOR
 
-        # Efficient baseline
         df["Efficient_Heavy_On"] = df["Intended_Heavy_On"]
         df["Efficient_Medium_On"] = df["Intended_Medium_On"]
         df["Efficient_Energy_Heavy"] = df["Efficient_Heavy_On"] * energy_heavy
@@ -164,7 +146,7 @@ def simulate_factory_data(num_heavy, energy_heavy, num_medium, energy_medium, p_
 
 class CarbonOptimizer:
     """Simple Q-learning for carbon-aware scheduling."""
-    def __init__(self, actions=["shift_heavy", "shift_medium", "no_action"], lr=0.1, gamma=0.9):
+    def __init__(self, actions=["shift_heavy", "shift_medium", "reduce_load", "no_action"], lr=0.1, gamma=0.9):
         self.q_table = {}
         self.actions = actions
         self.lr = lr
@@ -199,7 +181,6 @@ def train_model(df, target, model_type, cache_key):
         X = data[["Shift", "Hour", "Day_of_Week"]]
         y = data[target]
 
-        # Split data into training and testing sets
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
         preprocessor = ColumnTransformer(
@@ -249,7 +230,6 @@ def detect_inefficiencies(df):
     """Detect inefficiencies in energy consumption data."""
     inefficiencies = []
     
-    # Machine inefficiencies (running outside intended schedules)
     heavy_ineff = df[(df['Heavy_On'] > df['Intended_Heavy_On']) & (df['Shift'].isin(['overnight', 'weekend']))]
     medium_ineff = df[(df['Medium_On'] > df['Intended_Medium_On']) & (df['Shift'].isin(['overnight', 'weekend']))]
     if not heavy_ineff.empty:
@@ -257,12 +237,10 @@ def detect_inefficiencies(df):
     if not medium_ineff.empty:
         inefficiencies.append(f"Medium machines running unnecessarily during {len(medium_ineff)} off-hours (overnight/weekend).")
 
-    # HVAC inefficiencies
     hvac_ineff = df[df['HVAC_Inefficient'] == 1]
     if not hvac_ineff.empty:
         inefficiencies.append(f"HVAC operating inefficiently (low temperature threshold) for {len(hvac_ineff)} hours.")
 
-    # Lighting inefficiencies
     lighting_ineff = df[(~df['Is_Working_Hours']) & (df['Lighting_Energy'] > 10)]
     if not lighting_ineff.empty:
         inefficiencies.append(f"Lighting left on unnecessarily during {len(lighting_ineff)} non-working hours.")
@@ -287,13 +265,11 @@ def main():
     st.set_page_config(page_title="Factory Energy & Carbon Optimizer", layout="wide")
     st.title("Factory Energy & Carbon Optimizer")
 
-    # Debug option
     if st.sidebar.button("Clear Cache"):
         st.cache_data.clear()
         st.cache_resource.clear()
         st.rerun()
 
-    # Tabs
     tab1, tab2, tab3, tab4 = st.tabs(["Simulation", "Results", "Carbon Impact", "Documentation"])
 
     with tab1:
@@ -315,11 +291,11 @@ def main():
                 hours = {"1 Week (168h)": 168, "1 Month (720h)": 720, "3 Months (2160h)": 2160}[duration]
         else:
             uploaded_file = st.file_uploader("Upload Energy Data (Excel/CSV)", type=['xlsx', 'csv'])
-            num_heavy = 5  # Default for uploaded data
-            energy_heavy = 20.0  # Default for uploaded data
-            num_medium = 10  # Default for uploaded data
-            energy_medium = 10.0  # Default for uploaded data
-            p_ineff = q_ineff = r_ineff = 0.1  # Defaults for uploaded data
+            num_heavy = 5
+            energy_heavy = 20.0
+            num_medium = 10
+            energy_medium = 10.0
+            p_ineff = q_ineff = r_ineff = 0.1
             hours = None
 
         cost_per_kwh = st.number_input("Cost per kWh ($)", min_value=0.0, value=0.15, step=0.01)
@@ -361,7 +337,6 @@ def main():
                 st.error("Missing required columns. Please re-run the simulation or upload valid data.")
             else:
                 try:
-                    # Detect inefficiencies
                     st.subheader("Detected Inefficiencies")
                     inefficiencies = detect_inefficiencies(df)
                     if inefficiencies:
@@ -370,7 +345,6 @@ def main():
                     else:
                         st.write("No significant inefficiencies detected.")
 
-                    # Recommend actions
                     st.subheader("Recommended Actions")
                     actions = recommend_actions(inefficiencies)
                     if actions:
@@ -384,7 +358,6 @@ def main():
                         medium_model, medium_metrics = train_model(df, "Intended_Medium_On", params["model_type"], "medium")
 
                     if heavy_model and medium_model:
-                        # Display model accuracy metrics
                         st.subheader("Model Accuracy")
                         st.markdown("**Heavy Machines Model**")
                         st.table({
@@ -397,16 +370,14 @@ def main():
                             "Value": [f"{medium_metrics['MAE']:.4f}", f"{medium_metrics['MSE']:.4f}", f"{medium_metrics['R2']:.4f}"]
                         })
 
-                        # Carbon optimization
                         optimizer = CarbonOptimizer()
                         for i in range(min(100, len(df) - 1)):
                             state = optimizer.get_state(df["Shift"].iloc[i], df["Hour"].iloc[i], df["Solar_Available"].iloc[i])
                             action = optimizer.get_action(state)
-                            reward = -df["CO2_Emissions"].iloc[i]
+                            reward = -df["CO2_Emissions"].iloc[i] / (df["Total_Energy"].iloc[i] + 1)  # Normalize reward by energy
                             next_state = optimizer.get_state(df["Shift"].iloc[i + 1], df["Hour"].iloc[i + 1], df["Solar_Available"].iloc[i + 1])
                             optimizer.update(state, action, reward, next_state)
 
-                        # Predictions and optimization
                         df["Predicted_Heavy_On"] = heavy_model.predict(df[["Shift", "Hour", "Day_of_Week"]]).round().clip(0, params["num_heavy"])
                         df["Predicted_Medium_On"] = medium_model.predict(df[["Shift", "Hour", "Day_of_Week"]]).round().clip(0, params["num_medium"])
                         df["Optimized_Heavy_On"] = df["Predicted_Heavy_On"].copy()
@@ -414,11 +385,14 @@ def main():
 
                         for i in range(len(df)):
                             state = optimizer.get_state(df["Shift"].iloc[i], df["Hour"].iloc[i], df["Solar_Available"].iloc[i])
-                            action = optimizer.get_action(state, epsilon=0)
-                            if action == "shift_heavy" and df["Solar_Available"].iloc[i] > 0:
-                                df.loc[i, "Optimized_Heavy_On"] = min(df["Heavy_On"].iloc[i], df["Predicted_Heavy_On"].iloc[i] + 1)
-                            elif action == "shift_medium" and df["Solar_Available"].iloc[i] > 0:
-                                df.loc[i, "Optimized_Medium_On"] = min(df["Medium_On"].iloc[i], df["Predicted_Medium_On"].iloc[i] + 1)
+                            action = optimizer.get_action(state, epsilon=0.1)
+                            if action == "shift_heavy" and df["Solar_Available"].iloc[i] > 0 and df["Hour"].iloc[i] < 18:
+                                df.loc[i, "Optimized_Heavy_On"] = min(df["Heavy_On"].iloc[i], df["Predicted_Heavy_On"].iloc[i])
+                            elif action == "shift_medium" and df["Solar_Available"].iloc[i] > 0 and df["Hour"].iloc[i] < 18:
+                                df.loc[i, "Optimized_Medium_On"] = min(df["Medium_On"].iloc[i], df["Predicted_Medium_On"].iloc[i])
+                            elif action == "reduce_load":
+                                df.loc[i, "Optimized_Heavy_On"] = max(0, df["Optimized_Heavy_On"].iloc[i] - 1)
+                                df.loc[i, "Optimized_Medium_On"] = max(0, df["Optimized_Medium_On"].iloc[i] - 1)
 
                         df["Optimized_Energy_Heavy"] = df["Optimized_Heavy_On"] * params["energy_heavy"]
                         df["Optimized_Energy_Medium"] = df["Optimized_Medium_On"] * params["energy_medium"]
@@ -427,10 +401,16 @@ def main():
                         )
                         df["Optimized_Lighting_Energy"] = np.where(df["Is_Working_Hours"] | (df["Lighting_Energy"] == 10), df["Lighting_Energy"], 10)
                         df["Optimized_Total_Energy"] = df[["Optimized_Energy_Heavy", "Optimized_Energy_Medium", "Optimized_HVAC_Energy", "Optimized_Lighting_Energy"]].sum(axis=1)
-                        df["Optimized_Grid_Energy"] = np.maximum(0, df["Optimized_Total_Energy"] - df["Solar_Used"])
-                        df["Optimized_CO2_Emissions"] = df["Optimized_Grid_Energy"] * GRID_EMISSION_FACTOR + df["Solar_Used"] * SOLAR_EMISSION_FACTOR
+                        df["Optimized_Solar_Used"] = np.minimum(df["Solar_Available"], df["Optimized_Total_Energy"])
+                        df["Optimized_Grid_Energy"] = np.maximum(0, df["Optimized_Total_Energy"] - df["Optimized_Solar_Used"])
+                        df["Optimized_CO2_Emissions"] = df["Optimized_Grid_Energy"] * GRID_EMISSION_FACTOR + df["Optimized_Solar_Used"] * SOLAR_EMISSION_FACTOR
 
-                        # Metrics
+                        # Cap optimized energy to avoid excessive increases
+                        df["Optimized_Total_Energy"] = np.where(df["Optimized_Total_Energy"] > df["Total_Energy"] * MAX_ENERGY_INCREASE,
+                                                              df["Total_Energy"], df["Optimized_Total_Energy"])
+                        df["Optimized_Grid_Energy"] = np.maximum(0, df["Optimized_Total_Energy"] - df["Optimized_Solar_Used"])
+                        df["Optimized_CO2_Emissions"] = df["Optimized_Grid_Energy"] * GRID_EMISSION_FACTOR + df["Optimized_Solar_Used"] * SOLAR_EMISSION_FACTOR
+
                         baseline_energy = df["Total_Energy"].sum()
                         optimized_energy = df["Optimized_Total_Energy"].sum()
                         energy_savings = baseline_energy - optimized_energy
@@ -441,7 +421,6 @@ def main():
                         co2_savings = baseline_co2 - optimized_co2
                         trees_equivalent = (co2_savings / 1000) * TREES_PER_TON_CO2
 
-                        # Display results
                         st.subheader("Summary")
                         st.table({
                             "Metric": ["Baseline Energy (kWh)", "Optimized Energy (kWh)", "Energy Savings (kWh)", "Savings (%)",
@@ -452,12 +431,17 @@ def main():
                                       f"{optimized_co2:.2f}", f"{co2_savings:.2f}", f"{trees_equivalent:.2f}"]
                         })
 
-                        # Visualizations
                         st.subheader("Energy Usage")
                         fig_energy = go.Figure()
                         fig_energy.add_trace(go.Scatter(x=df["Timestamp"], y=df["Total_Energy"], name="Baseline", line=dict(color="red")))
                         fig_energy.add_trace(go.Scatter(x=df["Timestamp"], y=df["Optimized_Total_Energy"], name="Optimized", line=dict(color="green")))
-                        fig_energy.update_layout(title="Energy Usage (kW)", yaxis_title="Energy (kW)")
+                        fig_energy.update_layout(
+                            title="Energy Usage (kW)",
+                            yaxis_title="Energy (kW)",
+                            xaxis_title="Timestamp",
+                            hovermode="x unified",
+                            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+                        )
                         st.plotly_chart(fig_energy, use_container_width=True)
 
                         st.subheader("Energy Breakdown")
@@ -465,18 +449,33 @@ def main():
                         for col, name, color in [("Energy_Heavy", "Heavy Machines", "blue"), ("Energy_Medium", "Medium Machines", "orange"),
                                                ("HVAC_Energy", "HVAC", "green"), ("Lighting_Energy", "Lighting", "purple")]:
                             fig_breakdown.add_trace(go.Scatter(x=df["Timestamp"], y=df[col], name=name, stackgroup="one", line=dict(color=color)))
-                        fig_breakdown.update_layout(title="Baseline Energy Breakdown (kW)", yaxis_title="Energy (kW)")
+                        fig_breakdown.update_layout(
+                            title="Baseline Energy Breakdown (kW)",
+                            yaxis_title="Energy (kW)",
+                            xaxis_title="Timestamp",
+                            hovermode="x unified",
+                            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                            showlegend=True
+                        )
                         st.plotly_chart(fig_breakdown, use_container_width=True)
 
                         st.subheader("Daily Savings")
                         df["Date"] = df["Timestamp"].dt.date
                         daily_savings = df.groupby("Date").apply(lambda x: x["Total_Energy"].sum() - x["Optimized_Total_Energy"].sum()).reset_index(name="Savings")
+                        daily_savings = daily_savings[daily_savings["Savings"] != 0]  # Filter out zero savings
                         fig_savings = px.bar(daily_savings, x="Date", y="Savings", title="Daily Energy Savings (kWh)", color_discrete_sequence=["teal"])
+                        fig_savings.update_layout(
+                            yaxis_title="Savings (kWh)",
+                            xaxis_title="Date",
+                            hovermode="x unified",
+                            showlegend=False
+                        )
                         st.plotly_chart(fig_savings, use_container_width=True)
 
                         st.subheader("Export")
                         csv = df.to_csv(index=False)
                         st.download_button("Download Data as CSV", csv, f"factory_energy_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv", "text/csv")
+
                 except Exception as e:
                     st.error(f"Optimization error: {e}")
                     logger.error(f"Optimization error: {e}")
@@ -489,17 +488,18 @@ def main():
                 st.error("Carbon data missing. Please re-run the simulation or upload valid data.")
             else:
                 try:
-                    baseline_co2 = df["CO2_Emissions"].sum()
-                    optimized_co2 = df["Optimized_CO2_Emissions"].sum()
-                    co2_savings = baseline_co2 - optimized_co2
-                    trees_equivalent = (co2_savings / 1000) * TREES_PER_TON_CO2
-
                     st.subheader("Emissions Over Time")
-                    fig_co2 = go.Figure()
-                    fig_co2.add_trace(go.Scatter(x=df["Timestamp"], y=df["CO2_Emissions"], name="Baseline", line=dict(color="red")))
-                    fig_co2.add_trace(go.Scatter(x=df["Timestamp"], y=df["Optimized_CO2_Emissions"], name="Optimized", line=dict(color="green")))
-                    fig_co2.update_layout(title="CO2 Emissions (kg)", yaxis_title="CO2 (kg)")
-                    st.plotly_chart(fig_co2, use_container_width=True)
+                    fig_co2_time = go.Figure()
+                    fig_co2_time.add_trace(go.Scatter(x=df["Timestamp"], y=df["CO2_Emissions"], name="Baseline", line=dict(color="red")))
+                    fig_co2_time.add_trace(go.Scatter(x=df["Timestamp"], y=df["Optimized_CO2_Emissions"], name="Optimized", line=dict(color="green")))
+                    fig_co2_time.update_layout(
+                        title="CO2 Emissions Over Time (kg)",
+                        yaxis_title="CO2 Emissions (kg)",
+                        xaxis_title="Timestamp",
+                        hovermode="x unified",
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+                    )
+                    st.plotly_chart(fig_co2_time, use_container_width=True)
 
                     st.subheader("Emissions Breakdown")
                     co2_breakdown = {
@@ -509,6 +509,10 @@ def main():
                         "Lighting": (df["Lighting_Energy"] * GRID_EMISSION_FACTOR).sum()
                     }
                     fig_pie = px.pie(names=list(co2_breakdown.keys()), values=list(co2_breakdown.values()), title="Baseline CO2 Breakdown")
+                    fig_pie.update_layout(
+                        hovermode="x unified",
+                        showlegend=True
+                    )
                     st.plotly_chart(fig_pie, use_container_width=True)
 
                     st.subheader("Daily CO2 Emissions Comparison")
@@ -517,6 +521,7 @@ def main():
                         "CO2_Emissions": "sum",
                         "Optimized_CO2_Emissions": "sum"
                     }).reset_index()
+                    daily_co2 = daily_co2[(daily_co2["CO2_Emissions"] > 0) | (daily_co2["Optimized_CO2_Emissions"] > 0)]  # Filter out zero values
                     fig_daily_co2 = go.Figure()
                     fig_daily_co2.add_trace(go.Bar(
                         x=daily_co2["Date"],
@@ -533,9 +538,17 @@ def main():
                     fig_daily_co2.update_layout(
                         title="Daily CO2 Emissions Comparison (kg)",
                         yaxis_title="CO2 Emissions (kg)",
-                        barmode="group"
+                        xaxis_title="Date",
+                        barmode="group",
+                        hovermode="x unified",
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
                     )
                     st.plotly_chart(fig_daily_co2, use_container_width=True)
+
+                    baseline_co2 = df["CO2_Emissions"].sum()
+                    optimized_co2 = df["Optimized_CO2_Emissions"].sum()
+                    co2_savings = baseline_co2 - optimized_co2
+                    trees_equivalent = (co2_savings / 1000) * TREES_PER_TON_CO2
 
                     st.subheader("Sustainability Impact")
                     st.markdown(f"""
@@ -543,6 +556,7 @@ def main():
                     - **Trees Equivalent**: {trees_equivalent:.2f} trees
                     - **Goal**: Supports UN SDG 7 & 13 by reducing industrial emissions.
                     """)
+
                 except Exception as e:
                     st.error(f"Carbon impact error: {e}")
                     logger.error(f"Carbon impact error: {e}")
@@ -560,7 +574,7 @@ def main():
         - **Uploaded Data**: Accepts Excel/CSV files with columns: `Timestamp`, `Total Consumption (kWh)`, `Machine 1 (kWh)`, `Machine 2 (kWh)`, `HVAC (kWh)`, `Lighting (kWh)`, `Other (kWh)`. The data is mapped to internal formats for analysis and optimization.
 
         **Simulation Assumptions**  
-        - **Time Period**: For simulation, starts June 1, 2025, with durations (1 week: 168 hours, 1 month: 720 hours, 3 months: 2160 hours). For uploaded data, uses provided timestamps.  
+        - **Time Period**: Starts May 17, 2025, with durations (1 week: 168 hours, 1 month: 720 hours, 3 months: 2160 hours). For uploaded data, uses provided timestamps.  
         - **Shifts and Occupancy**:  
           - Day Shift: Weekdays, 8 AM–4 PM, full operation.  
           - Night Shift: Weekdays, 4 PM–12 AM, reduced heavy machines.  
