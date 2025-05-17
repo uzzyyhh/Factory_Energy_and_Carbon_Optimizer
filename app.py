@@ -203,11 +203,13 @@ def train_model(df, target, model_type, cache_key):
             X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.1, random_state=42)
 
             preprocessor = ColumnTransformer(
-                transformers=[("shift", OneHotEncoder(drop="first", sparse_output=False), ["Shift"])],
+                transformers=[
+                    ("shift", OneHotEncoder(categories=[['day', 'night', 'overnight', 'weekend']], drop="first", sparse_output=False), ["Shift"])
+                ],
                 remainder="passthrough"
             )
             if model_type == "Random Forest":
-                model = RandomForestRegressor(n_estimators=100, max_depth=15, min_samples_split=5, random_state=42)  # Tuned for better accuracy
+                model = RandomForestRegressor(n_estimators=100, max_depth=15, min_samples_split=5, random_state=42)
             else:
                 model = LinearRegression()
             pipeline = Pipeline([("preprocessor", preprocessor), ("regressor", model)])
